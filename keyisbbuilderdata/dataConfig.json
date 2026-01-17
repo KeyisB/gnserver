@@ -1,0 +1,10 @@
+{
+    "requirements": [
+        "aioquic",
+        "anyio",
+        "gnobjects",
+        "KeyisBTools",
+        "aiofiles",
+        "uvloop"
+    ]
+}
