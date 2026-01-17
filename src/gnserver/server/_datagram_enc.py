@@ -74,9 +74,7 @@ class ConnectionEncryptor:
         
         self_domain = self.eEndpoint._kdc._client._domain
         
-        print(f'UDP: init ConnectionEncryptor keys:\nkeyid: {keyid}\ndestination: {DestDomain}\ndomain: {self_domain}\nencryption_type: {encryption_type}')
-
-        #print(f'key_material type -> {type(key)} {key}')
+        
         
         self._key_in = HKDF(algorithm=hashes.SHA3_512(), length=32, salt=DestDomain.encode() + self_domain.encode(), info=b'gn:DgEncryptor').derive(key)
         self._key_out = HKDF(algorithm=hashes.SHA3_512(), length=32, salt=self_domain.encode() + DestDomain.encode(), info=b'gn:DgEncryptor').derive(key)
@@ -89,7 +87,7 @@ class ConnectionEncryptor:
 
     
     async def initByDomain(self, encryption_type: int, domain: str) -> int:
-        #print(f'UDP: client init {domain} [{encryption_type}]')
+
         self.encryption_type = encryption_type
         if encryption_type == 0:
             await self.initRaw()
@@ -180,33 +178,6 @@ class TransportProxy(asyncio.DatagramTransport):
         self.base6 = None
         self.base4 = None
 
-        # for x in base:
-        #     if x.get_extra_info("socket").family == 10:
-        #         self.base6 = x
-        #     elif x.get_extra_info("socket").family == 2:
-        #         self.base4 = x
-        #     else:
-        #         raise Exception('DatagramTransport family not in (10, 2)')
-
-        # for t in base:
-        #     sockname = t.get_extra_info("sockname")
-        #     if not sockname:
-        #         continue
-
-        #     ip = sockname[0]
-
-        #     try:
-        #         addr = ipaddress.ip_address(ip)
-        #     except ValueError:
-        #         continue
-
-        #     if addr.version == 4:
-        #         self.base4 = t
-        #     elif addr.version == 6:
-        #         self.base6 = t
-        #     else:
-        #         raise Exception('DatagramTransport ip version not in (4, 6)')
-
         for t in base:
             sock = t.get_extra_info("socket")
             if not sock:
@@ -229,7 +200,6 @@ class TransportProxy(asyncio.DatagramTransport):
                 except Exception:
                     self.base6 = t
 
-        # ЖЁСТКАЯ проверка
         if not self.base4 and not self.base6:
             raise RuntimeError("No usable DatagramTransport (IPv4/IPv6) found")
 
@@ -243,21 +213,15 @@ class TransportProxy(asyncio.DatagramTransport):
         self.tablex_maddr_isV4 = set()
 
     def sendto(self, data: bytes, addr=None):
-        #print(f'UPD: SENDING FROM QUIC TO {addr}, len({len(data)})')
-        
-        #print(f'QUIC SEND: {addr} {data.hex()}')
         self.endpoint.sendto(data, addr)
         
 
 
     def sendMapped(self, data: bytes, addr=None):
-        #print(f'SEND: {data.hex()}')
         maddr = DatagramEndpoint.from_addr_to_maddr(addr)
         if maddr in self.tablex_maddr_isV4:
-            #print(f'UDP: Отправлено по ipv4 {addr}')
             self.base4.sendto(data, addr)
         else:
-            #print(f'UDP: Отправлено по ipv6 {addr}')
             self.base6.sendto(data, addr)
     
 
@@ -285,7 +249,6 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
 
         self._domain: Optional[str] = None
 
-        #print('INIT ' + f'DatagramEndpoint as {DatagramEndpoint}')
 
         self.__transports = transports
         self.__transports_list = []
@@ -311,22 +274,15 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
 
     def getDomain(self, proto: QuicProtocolShell) -> Optional[str]:
         d = self.x_cid_domain.get(proto._quic.original_destination_connection_id, None)
-
-            
         if d is None:
-            #print(f'NOT SET DOMAIN: {d}')
             return
-        
-        #print(f'SET DOMAIN: {d} ')
         return d
     
     
     def connection_lost(self, exc):
-        #print("UDP: CLIENT: connection_lost", exc)
         self._quic_routing.connection_lost(exc)
 
     def error_received(self, exc):
-        #print('UDP: error_received:', exc)
         if hasattr(self._quic_routing, "error_received"):
             self._quic_routing.error_received(exc)
 
@@ -359,7 +315,6 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
     
 
     def datagram_received(self, data, addr):
-        #print(f'RECV: {data.hex()}')
         self.loop.create_task(self._handle_datagram(data, addr))
 
     @staticmethod
@@ -400,14 +355,12 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
 
     def sendto(self, data: bytes, addr):
         
-        #print('send [quic] -> ', data.hex())
         
         maddr = self.from_addr_to_maddr(addr)
 
         connectionEnc = self.getDgEnc(maddr)
 
         if is_quic_initial(data[0]): # init соеденения
-            #print(f'UDP: send initial packet to ({addr})')
 
             if self._domain is None:
                 print('Server init with None domain. It`s client')
@@ -431,18 +384,14 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
         else:
             enc = data
 
-        #print(f'UDP: send packet to ({addr}) len({len(b0 + enc)})')
         self.transport.sendMapped(b0 + enc, addr)
 
     async def async_sendto(self, connectionEnc: 'ConnectionEncryptor', data: bytes, addr):
-        #print(f'UDP: Connection initialization send [start] ({self._domain})')
-        #print(f'wait... [{addr}] ({self._domain})')
         if not connectionEnc.ready:
             keyid = await connectionEnc.initByDomain(self._default_encryption_type, cast(str, self._domain))
         else:
             keyid = connectionEnc.keyid
 
-        #print(f'wait... [{addr}] ({self._domain}) [complete]')
         p = self.construct_initial(self._default_encryption_type, keyid)
 
         if self._default_encryption_type != 0:
@@ -456,9 +405,7 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
         
         dg = p + enc
         
-        #print('UDP: init send start')
         self.transport.sendMapped(dg, addr)
-        #print(f'UDP: init send complete len({len(dg)})')
 
 
         if not connectionEnc.not_ready_queue.empty():
@@ -466,11 +413,8 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
                 data, addr = connectionEnc.not_ready_queue.get_nowait()
                 self.sendto(data, addr)
         
-        #print(f'UDP: Connection initialization send [complete] ({self._domain})')
 
     async def _handle_datagram(self, data: bytes, addr):
-        #print(f'UDP: recv packet from ({addr}) len({len(data)})')
-        #print(f'UDP: recv [gn-quic] -> ', data.hex())
         
         value = (data[0] >> 1) & 0x7F
         if value != self._gn_protocol_version:
@@ -495,15 +439,12 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
                 if len(addr) == 2:
                     self.transport.addV4maddr(maddr)
 
-                #print(f'UDP: recv initial packet from ({addr})')
                 encryption_type = data[1] & 0x0F
-                #print(f'UDP: Connection initialization recv [start] ({addr})')
                 if encryption_type != 0: # encrypted
                     
                         
                     keyType = data[2]
                     key_id = int.from_bytes(data[3:10], 'big')
-                    #print(f'UDP: recieve encryption_type != 0: {encryption_type}, key_id: {key_id}')
 
                     
                     if not self._kdc._active_key_synchronization:
@@ -517,7 +458,6 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
                         connectionEnc.ready = None
                         raise Exception(f'Соединение {d} отклонено из за политики active_key_synchronization_callback_domain_filter: {self.DEPConfig.kdc_active_key_synchronization_domain_filter}')
 
-                    #print(f'UDP: initByKeyid != 0: {encryption_type}, key_id: {key_id} -> {d}')
                 else:
                     if maddr[0] in ('::1', '127.0.0.1', '::ffff:127.0.0.1'):
                         if not self.DEPConfig.allow_local_unencrypted_connections:
@@ -537,7 +477,6 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
                 while not connectionEnc.not_ready_queue.empty():
                     raw, a = connectionEnc.not_ready_queue.get_nowait()
                     await self._handle_datagram(raw, a)
-                #print(f'UDP: Connection initialization recv [complete] ({addr}) ({d})')
         else:
             datagram = data[1:]
 
@@ -549,7 +488,6 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
         if connectionEnc.encryption_type != 0:
             try:
                 dec = connectionEnc.decrypt(datagram)
-                #print(f'UDP: Успешная расшифровка пакета len({len(dec)})')
                 
             except Exception as e:
                 print(f"UDP: UPD Decryption error: {e}")
@@ -558,14 +496,9 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
         else:
             dec = datagram
 
-        #print(f'QUIC RECV: {addr} {dec.hex()}')
-
-        
         if d is not None and isinstance(self._quic_routing, QuicServer):
             self.add_QuicProtocolShellServer_domain(dec, d)
 
-
-        #print('recv [quic] -> ', dec.hex())
         self._quic_routing.datagram_received(dec, addr)
 
 

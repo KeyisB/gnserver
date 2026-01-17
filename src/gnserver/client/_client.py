@@ -58,8 +58,6 @@ L3 - IP
 L4 - TCP/UDP
 L5 - quic(packet managment)
 L6 - GN(protocol managment)
-
-
 """
 
 
@@ -138,7 +136,7 @@ class AsyncClient:
                     await asyncio.wait_for(c.connect_future, reconnect_wait or self._configuration.get('L5', {}).get('connection', {}).get())
                     if c.status == 'active':
                         return c
-                    elif c.status == 'connecting': # если очень долго подключаемся, то кидаем ошибку
+                    elif c.status == 'connecting':
                         await self.disconnect(domain)
                         raise AllGNFastCommands.transport.SendTimeout()
                     elif c.status == 'disconnect':
@@ -150,9 +148,7 @@ class AsyncClient:
 
         c = QuicClient(self, domain)
         self._active_connections[domain] = c
-        #print(f'RAW: getting dns {domain} [{request.url.isIp}]')
         data = await self.getDNS(domain, raise_errors=True, host=domain if request.url.isIp else None)
-        #print(f'RAW: getting dns {domain} [complete] -> {data}')
 
         data = Url.ipv6_with_port_to_ipv6_and_port(data)
 
@@ -279,7 +275,6 @@ class AsyncClient:
             if resuilt is not None:
                 if raise_errors:
                     r1_data = resuilt.payload
-                    #result = r1_data['ip'] + ':' + str(r1_data['port']) # type: ignore
                     result = Url.ip_and_port_to_ipv6_with_port(r1_data['ip'], r1_data['port'])
                 else:
                     result = resuilt
@@ -322,7 +317,6 @@ class AsyncClient:
         else:
             domain_dns = 'api.dns.gn'
 
-        #print(f'DNS: request {f'gn://{ip_dns}/getIp?d={domain}'}')
         r1 = await self.request(GNRequest('GET', Url(f'gn://{domain_dns}/getIp?d={domain}'), payload=domain), keep_alive=keep_alive)
 
         if not r1.command.ok:
@@ -345,10 +339,6 @@ class AsyncClient:
 
 class RawQuicClient(QuicProtocolShell):
 
-    SYS_RATIO_NUM = 9  # SYS 9/10
-    SYS_RATIO_DEN = 10
-
-    # ────────────────────────────────────────────────────────────────── init ─┐
     def __init__(self, quic: QuicConnection, datagramEndpoint, client: 'QuicClient', stream_handler):
         self._client = client
         
@@ -359,16 +349,14 @@ class RawQuicClient(QuicProtocolShell):
         self._queue_sys: Deque[Tuple[int, bytes, bool]] = deque()
         self._queue_user: Deque[Tuple[int, bytes, bool]] = deque()
 
-        # <‑‑ Future | Queue[bytes | None]
         self._inflight: Dict[int, Union[asyncio.Future, asyncio.Queue[Optional[GNResponse]]]] = {}
         self._inflight_streams: Dict[int, bytearray] = {}
         self._buffer: Dict[Union[int, str], bytearray] = {}
 
         self._last_activity = time.time()
         self._running = True
-        self._ping_id_gen = count(1)  # int64 ping‑id generator
+        self._ping_id_gen = count(1)
 
-    # ───────────────────────────────────────── private helpers ─┤
     def _activity(self):
         self._last_activity = time.time()
 
@@ -384,10 +372,7 @@ class RawQuicClient(QuicProtocolShell):
     def stop(self):
         self._running = False
 
-    # ───────────────────────────────────────────── events ─┤
     def quic_event_received(self, event: QuicEvent) -> None:
-        #print(f'QUIC: RECEIVE QUIC EVENT CLIENT: {event}')
-        # ─── DATA ───────────────────────────────────────────
         if isinstance(event, StreamDataReceived):
             handler = self._inflight.get(event.stream_id)
             if handler is None:
@@ -418,9 +403,6 @@ class RawQuicClient(QuicProtocolShell):
 
 
         elif isinstance(event, ConnectionTerminated):
-            #print("QUIC: QUIC connection closed")
-            #print("QUIC: Error code:", event.error_code)
-            #print("QUIC: Reason:", event.reason_phrase)
             if self.quicClient is None:
                 return
             
@@ -505,8 +487,6 @@ class QuicClient:
         cfg.load_verify_locations(cadata=crt_client)
         cfg.idle_timeout = self._client._configuration.get('L5', {}).get('disconnection', {}).get('idle_timeout', 60)
 
-        #print(f'QUIC: Client: connecting [{self.domain}] -> {Url.ip_and_port_to_ipv6_with_port(ip, port)}')
-
         encType = int(not self.domain == Url.ip_and_port_to_ipv6_with_port(ip, port))
         if self._client._kdc.getDomainEcryptionType(self.domain) is None:
             self._client._kdc.setDomainEcryptionType(self.domain, encType)
@@ -573,7 +553,7 @@ class QuicClient:
                 await self._client_cm.__aexit__(None, None, None)
                 self._client_cm = None
 
-    async def asyncRequest(self, request: Union[GNRequest, AsyncGenerator[GNRequest, Any]]) -> GNResponse:
+    async def asyncRequest(self, request: GNRequest) -> GNResponse:
         if self._quik_core is None:
             raise RuntimeError("Not connected")
         

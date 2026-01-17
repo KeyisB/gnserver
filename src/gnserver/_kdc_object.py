@@ -1,6 +1,4 @@
 from typing import List, Optional, Dict, Union, Set, TYPE_CHECKING, Callable, Coroutine
-
-# from ._app import GNRequest
 from gnobjects.net.objects import Url, GNRequest
 import inspect
 from typing import List, Optional, Dict, Union, Set, Deque, Tuple, cast
@@ -67,7 +65,6 @@ class KDCObject:
     def getDomainEcryptionType(self, domain_or_keyId: Union[str, int]) -> Optional[int]:
         return self._encryption_type.get(domain_or_keyId)
 
-    # ---- Инициализация/обновление KDC ----
     async def addServers(self, servers_keys: Optional[List[Tuple[Union[Tuple[int, int], int], str, bytes]]] = None,
                    requested_domains: Optional[List[str]] = None): # type: ignore
         if requested_domains is not None:

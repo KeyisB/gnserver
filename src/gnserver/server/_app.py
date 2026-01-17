@@ -8,6 +8,7 @@ import inspect
 import traceback
 import socket
 import datetime
+import logging
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union, AsyncGenerator, Awaitable, cast, Coroutine, Literal, ParamSpec, Concatenate, TypeVar
 from aioquic.asyncio.server import QuicServer
 from aioquic.asyncio.protocol import QuicConnectionProtocol
@@ -50,20 +51,15 @@ except ImportError:
 
 
 
-import logging
 
 logger = logging.getLogger("GNServer")
 logger.setLevel(logging.DEBUG)
 logger.propagate = False
-# --- Удаляем все старые хендлеры, чтобы не было дублей ---
 if logger.hasHandlers():
     logger.handlers.clear()
 
-# --- Добавляем новый консольный хендлер ---
 console = logging.StreamHandler(sys.stdout)
 console.setLevel(logging.DEBUG)
-
-# Формат с временем
 formatter = logging.Formatter(
     "[%(asctime)s] [%(name)s] %(levelname)s: %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S"
@@ -154,7 +150,6 @@ class App:
             is_async = h['async']
             params = h['parameters']
 
-            # фильтрация kwargs по сигнатуре функции
             if kwargs:
                 call_kwargs = {k: v for k, v in kwargs.items() if k in params} # type: ignore
             else:
@@ -175,7 +170,7 @@ class App:
 
         for r in self._routes:
             if hasattr(request, '_gn_server_proxy_list'):
-                if r in request._gn_server_proxy_list:
+                if r in request._gn_server_proxy_list: # type: ignore
                     continue
         
             m = next((r.regex.fullmatch(p) for p in cand if r.regex.fullmatch(p)), None)
@@ -229,9 +224,9 @@ class App:
 
             if isinstance(result, GNRequest):
                 if not hasattr(request, '_gn_server_proxy_list'):
-                    result._gn_server_proxy_list = [r]
+                    result._gn_server_proxy_list = [r]  # type: ignore
                 else:
-                    result._gn_server_proxy_list.append(r)
+                    result._gn_server_proxy_list.append(r)  # type: ignore
                 return await self.dispatchRequest(result)
 
             if isinstance(result, (TempDataObject, TempDataGroup)):
@@ -323,8 +318,6 @@ class App:
             asyncio.create_task(self._api.dispatchEvent('connect', proto=self, domain=self._domain))
             
         def quic_event_received(self, event: QuicEvent):
-            
-            #print(f'QUIC: RECEIVE QUIC EVENT SERVER: {event}')
             if isinstance(event, StreamDataReceived):
                 buf = self._buffer.setdefault(event.stream_id, bytearray())
                 buf.extend(event.data)
@@ -431,7 +424,7 @@ class App:
                 response = await self._api.dispatchRequest(request)
 
                 if inspect.isasyncgen(response):
-                    async for chunk in response:  # type: ignore[misc]
+                    async for chunk in response:  # type: ignore
                         chunk._stream = True
                         await self.sendResponse(request, chunk, False)
                         
@@ -574,8 +567,6 @@ class App:
                 host = ('::', '0.0.0.0')
         
 
-
-            #print(f'SERVER starting datagram_endpoint on {(host, port)}')
             if isinstance(host, str):
                 if ',' in host:
                     host = cast(Tuple[str, str], tuple([x.strip() for x in host.split(',')]))
@@ -604,7 +595,6 @@ class App:
             #         sock=sock4
             #     )
 
-            #print(f'SERVER starting datagram_endpoint [complete]')
 
             # async def f():
             #     print('checking...')
