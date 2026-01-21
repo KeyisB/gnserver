@@ -13,6 +13,7 @@ from gnobjects.net.objects import CORSObject
 
 @dataclass
 class Route:
+    route: str
     method: str
     path_expr: str
     regex: Pattern[str]

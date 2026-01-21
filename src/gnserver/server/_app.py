@@ -26,7 +26,7 @@ R = TypeVar("R")
 from gnobjects.net.objects import GNRequest, GNResponse, FileObject, CORSObject, TempDataGroup, TempDataObject, CacheConfig
 from gnobjects.net.fastcommands import AllGNFastCommands, GNFastCommand, AllGNFastCommands as responses
 
-from KeyisBTools.cryptography.bytes import userFriendly
+from KeyisBTools.bytes.transformation import userFriendly
 from KeyisBTools.models.serialization import serialize, deserialize
 
 
@@ -51,7 +51,6 @@ except ImportError:
 
 
 
-
 logger = logging.getLogger("GNServer")
 logger.setLevel(logging.DEBUG)
 logger.propagate = False
@@ -70,7 +69,8 @@ logger.addHandler(console)
 
 
 class App:
-    def __init__(self):
+    def __init__(self, only_client: bool = False):
+        self._only_client = only_client
         self._routes: List[Route] = []
         self._cors: Optional[CORSObject] = None
         self._events: Dict[str, List[Dict[str, Union[Any, Callable]]]] = {}
@@ -80,18 +80,27 @@ class App:
         self.DEPConfig = DEPConfig()
 
         
-        self.client = AsyncClient()
+        self.client = AsyncClient(self)
 
         
         self._datagramEndpoint: DatagramEndpoint = None # type: ignore
 
-    def route(self, method: str, path: str, cors: Optional[CORSObject] = None):
+        self.connections: Dict[str, App._ServerProto] = {}
+
+    async def sendObject(self, domain:str, object: Union[TempDataObject, TempDataGroup], end_stream: bool = True):
+        a = self.connections.get(domain)
+        if a is None:
+            return
+        await a.sendObject(object, end_stream)
+
+    def route(self, method: str, path: str, cors: Optional[CORSObject] = None, route:str = 'api'):
         if path == '/':
             path = ''
         def decorator(fn: Callable[Concatenate[GNRequest, P], Coroutine[None, None, Union[GNResponse, TempDataObject, TempDataGroup, GNRequest, None]]]):
             regex, param_types = _compile_path(path)
             self._routes.append(
                 Route(
+                    route,
                     method.upper(),
                     path,
                     regex,
@@ -169,6 +178,9 @@ class App:
         allowed = set()
 
         for r in self._routes:
+            if r.route != request.route and r.route != '*':
+                continue
+
             if hasattr(request, '_gn_server_proxy_list'):
                 if r in request._gn_server_proxy_list: # type: ignore
                     continue
@@ -270,7 +282,6 @@ class App:
             fileObject = FileObject(file_path)
             return responses.ok(TempDataObject('static', path=path, payload=fileObject, cache=cache, cors=cors, inType=inType))
 
-
     def staticDir(self, path: str, dir_path: str, cache: Optional[CacheConfig] = None, cors: Optional[CORSObject] = None, inType: Optional[str] = None):
         @self.get(f"{path}/{{_path:path}}")
         async def r_static(_path: str):
@@ -286,12 +297,9 @@ class App:
             return responses.ok(TempDataObject('static', path=f'{path}/{_path}', payload=fileObject, cache=cache, cors=cors, inType=inType))
 
     def routeObject(self, object: Union[TempDataObject, TempDataGroup]):
-        @self.route(object.method, object.path)
+        @self.route(object.method, object.path, route='tdo')
         async def _r_static(request):
             return responses.ok(object)
-
-
-
 
     def _init_sys_routes(self):
         @self.post('/!gn-vm-host/ping', cors=CORSObject(allow_client_types=['server', 'net']))
@@ -314,6 +322,8 @@ class App:
             self._domain: str = cast(str, self.datagramEndpoint.getDomain(self))
             self._disconnected = False
             self._init_domain = False
+
+            self._api.connections[self._domain] = self
 
             asyncio.create_task(self._api.dispatchEvent('connect', proto=self, domain=self._domain))
             
@@ -414,7 +424,7 @@ class App:
                         'time': datetime.datetime.now(datetime.timezone.utc).isoformat(),
                         'route': str(request.route),
                         'method': request.method,
-                        'url': str(request.url),
+                        'url': str(request.url)
                     })
 
 
@@ -426,30 +436,30 @@ class App:
                 if inspect.isasyncgen(response):
                     async for chunk in response:  # type: ignore
                         chunk._stream = True
-                        await self.sendResponse(request, chunk, False)
+                        await self._sendResponseFromRequest(request, chunk, False)
                         
                     resp = GNResponse('gn:end-stream')
                     resp._stream = True # type: ignore
 
-                    await self.sendResponse(request, resp)
+                    await self._sendResponseFromRequest(request, resp)
                     return
 
                 if not isinstance(response, GNResponse):
-                    await self.sendResponse(request, AllGNFastCommands.InternalServerError())
+                    await self._sendResponseFromRequest(request, AllGNFastCommands.InternalServerError('Invalid response'))
                     return
 
-                await self.sendResponse(request, response)
+                await self._sendResponseFromRequest(request, response)
             except Exception as e:
                 if isinstance(e, (GNRequest, GNFastCommand)):
-                    await self.sendResponse(request, e)
+                    await self._sendResponseFromRequest(request, e)
                 else:
                     logger.error('InternalServerError:\n'  + traceback.format_exc())
 
-                    await self.sendResponse(request, AllGNFastCommands.InternalServerError())
+                    await self._sendResponseFromRequest(request, AllGNFastCommands.InternalServerError())
             
 
         
-        async def sendResponse(self, request: GNRequest, response: GNResponse, end_stream: bool = True):
+        async def _sendResponseFromRequest(self, request: GNRequest, response: GNResponse, end_stream: bool = True):
             await self._resolve_dev_transport_response(response, request)
 
             logger.debug(f'[>] [{request.client.domain}] Response: {request.method} {request.url} -> {response.command} {response.payload if len(str(response.payload)) < 256 else ''}')
@@ -461,6 +471,17 @@ class App:
             blob = response.serialize()
             self._quic.send_stream_data(stream_id, blob, end_stream=end_stream) # type: ignore
             self.transmit()
+        
+        async def sendObject(self, object: Union[TempDataObject, TempDataGroup], end_stream: bool = True):
+            if isinstance(object, TempDataGroup):
+                await object.assemble()
+                blob = object.serialize()
+            else:
+                object.assemble()
+                blob = await object.serialize()
+            
+            sid = self._quic.get_next_available_stream_id()
+            self._quic.send_stream_data(sid, blob, end_stream=end_stream)
 
     def run(
         self,
@@ -546,63 +567,63 @@ class App:
         async def _main():
             
             await self.dispatchEvent('start')
+            if not self._only_client:
+                self._datagramEndpoint: DatagramEndpoint = None # type: ignore
 
-            self._datagramEndpoint: DatagramEndpoint = None # type: ignore
+                def proto_factory(*a, **kw):
+                    return App._ServerProto(*a, api=self, datagramEndpoint=self._datagramEndpoint, **kw)
 
-            def proto_factory(*a, **kw):
-                return App._ServerProto(*a, api=self, datagramEndpoint=self._datagramEndpoint, **kw)
+                quic_server = QuicServer(
+                    configuration=cfg,
+                    create_protocol=proto_factory,
+                )
 
-            quic_server = QuicServer(
-                configuration=cfg,
-                create_protocol=proto_factory,
-            )
+                self._datagramEndpoint = DatagramEndpoint(quic_server, self.client._kdc, dEPConfig=self.DEPConfig)
 
-            self._datagramEndpoint = DatagramEndpoint(quic_server, self.client._kdc, dEPConfig=self.DEPConfig)
-
-            loop = asyncio.get_event_loop()
-
-
-            nonlocal host
-            if host == '0.0.0.0':
-                host = ('::', '0.0.0.0')
-        
-
-            if isinstance(host, str):
-                if ',' in host:
-                    host = cast(Tuple[str, str], tuple([x.strip() for x in host.split(',')]))
-                host = (host,)
+                loop = asyncio.get_event_loop()
 
 
+                nonlocal host
+                if host == '0.0.0.0':
+                    host = ('::', '0.0.0.0')
+            
 
-            sock = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
-            sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
-            sock.bind((host[0], int(port), 0, 0))
+                if isinstance(host, str):
+                    if ',' in host:
+                        host = cast(Tuple[str, str], tuple([x.strip() for x in host.split(',')]))
+                    host = (host,)
 
 
 
-            await loop.create_datagram_endpoint(
-                lambda: self._datagramEndpoint,
-                sock=sock
-            )
-
-            # if len(host) == 2: # 1 or 2
-            #     print(f'binding [{(host[1], int(port))}]')
-            #     sock4 = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            #     sock4.bind((host[1], int(port)))
-
-            #     await loop.create_datagram_endpoint(
-            #         lambda: datagramEndpoint,
-            #         sock=sock4
-            #     )
+                sock = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+                sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+                sock.bind((host[0], int(port), 0, 0))
 
 
-            # async def f():
-            #     print('checking...')
-            #     print(f'datagram_endpoint transport {a.is_closing()}')
-            #     await asyncio.sleep(0.5)
-            #     await f()
 
-            # loop.create_task(f())
+                await loop.create_datagram_endpoint(
+                    lambda: self._datagramEndpoint,
+                    sock=sock
+                )
+
+                # if len(host) == 2: # 1 or 2
+                #     print(f'binding [{(host[1], int(port))}]')
+                #     sock4 = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                #     sock4.bind((host[1], int(port)))
+
+                #     await loop.create_datagram_endpoint(
+                #         lambda: datagramEndpoint,
+                #         sock=sock4
+                #     )
+
+
+                # async def f():
+                #     print('checking...')
+                #     print(f'datagram_endpoint transport {a.is_closing()}')
+                #     await asyncio.sleep(0.5)
+                #     await f()
+
+                # loop.create_task(f())
 
             if run is not None:
                 await run()
@@ -615,7 +636,7 @@ class App:
         asyncio.run(_main())
 
 
-    def runByVMHost(self):
+    def runByVMHost(self): 
         """
         # Запусить через VM-host
 

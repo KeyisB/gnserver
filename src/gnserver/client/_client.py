@@ -4,7 +4,7 @@ import asyncio
 import datetime
 from itertools import count
 from collections import deque
-from typing import Any, Dict, Deque, Tuple, Union, Optional, AsyncGenerator, Callable, Literal, AsyncIterable, overload, Coroutine, List
+from typing import Any, Dict, Deque, Tuple, Union, Optional, AsyncGenerator, Callable, Literal, AsyncIterable, overload, Coroutine, List, TYPE_CHECKING
 from aioquic.quic.events import QuicEvent, StreamDataReceived, StreamReset, ConnectionTerminated
 from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.connection import QuicConnection
@@ -13,9 +13,6 @@ import traceback
 import logging
 
 from KeyisBTools import TTLDict
-from KeyisBTools.cryptography.bytes import hash3, userFriendly
-from KeyisBTools.models.serialization import serialize
-from KeyisBTools.ranges.positionRange import in_range
 from gnobjects.net.objects import GNRequest, GNResponse, Url
 from gnobjects.net.fastcommands import AllGNFastCommands
 from gnobjects.net.domains import GNDomain
@@ -26,7 +23,8 @@ from ..server._datagram_enc import QuicProtocolShell, ConnectionEncryptor
 from ._client_quic_shell import connect
 
 
-
+if TYPE_CHECKING:
+    from ..server._app import App
 
 logger = logging.getLogger("GNClient")
 logger.setLevel(logging.DEBUG)
@@ -40,7 +38,6 @@ formatter = logging.Formatter(
     datefmt="%Y-%m-%d %H:%M:%S"
 )
 console.setFormatter(formatter)
-
 logger.addHandler(console)
 
 
@@ -62,7 +59,8 @@ L6 - GN(protocol managment)
 
 
 class AsyncClient:
-    def __init__(self):
+    def __init__(self, server: Optional['App'] = None):
+        self.server = server
         self.__dns_core__ipv4 = Url.ipv4_with_port_to_ipv6_with_port('51.250.85.38:52943')
         self.__dns_gn__ipv4: Optional[str] = None
 
@@ -203,7 +201,7 @@ class AsyncClient:
 
         return request
 
-    async def request(self, request: GNRequest, keep_alive: bool = True, restart_connection: bool = False, reconnect_wait: float = 10) -> GNResponse:
+    async def request(self, request: GNRequest, keep_alive: bool = True, restart_connection: bool = False, reconnect_wait: float = 10, only_request: bool = False) -> GNResponse:
 
         print(f'Request: {request.method} {request.url}')
 
@@ -221,7 +219,7 @@ class AsyncClient:
 
             for f in self.__request_callbacks.values():
                 asyncio.create_task(f(request))
-            r = await c.asyncRequest(request)
+            r = await c.asyncRequest(request, only_request=only_request)
             logger.debug(f'Response: {request.method} {request.url} -> {r.command} {r.payload if len(str(r.payload)) < 512 else f'len({len(str(r.payload))})'}')
 
             for f in self.__response_callbacks.values():
@@ -376,18 +374,29 @@ class RawQuicClient(QuicProtocolShell):
         if isinstance(event, StreamDataReceived):
             handler = self._inflight.get(event.stream_id)
             if handler is None:
-                return
-            
-            if not isinstance(handler, asyncio.Queue):
+                if self._client._client.server is None:
+                    return
                 buf = self._buffer.setdefault(event.stream_id, bytearray())
                 buf.extend(event.data)
-                if event.end_stream:
+                if not event.end_stream:
+                    return
+                self._inflight.pop(event.stream_id, None)
+                data = bytes(self._buffer.pop(event.stream_id, b""))
+
+                self._loop.create_task(self._client._client.server.dispatchRequest(GNRequest.deserialize(data)))
+
+            else:
+                if not isinstance(handler, asyncio.Queue):
+                    buf = self._buffer.setdefault(event.stream_id, bytearray())
+                    buf.extend(event.data)
+                    if not event.end_stream:
+                        return
                     self._inflight.pop(event.stream_id, None)
                     data = bytes(self._buffer.pop(event.stream_id, b""))
                     if not handler.done():
                         handler.set_result(data)
-            else:
-                raise NotImplementedError
+                else:
+                    raise NotImplementedError
                 
 
         # ─── RESET ──────────────────────────────────────────
@@ -437,7 +446,7 @@ class RawQuicClient(QuicProtocolShell):
 
 
 
-    async def request(self, request: GNRequest):
+    async def request(self, request: GNRequest, only_request: bool = False):
     
         await self._resolve_requests_transport(request)
         blob = await request.serialize()
@@ -445,23 +454,26 @@ class RawQuicClient(QuicProtocolShell):
         sid = self._quic.get_next_available_stream_id()
 
         fut = asyncio.get_running_loop().create_future()
-        self._inflight[sid] = fut
+        if not only_request:
+            self._inflight[sid] = fut
         
         self._quic.send_stream_data(sid, blob, end_stream=True)
         self._schedule_flush()
 
-        
+
+        if only_request:
+            return AllGNFastCommands.transport.NoResponse()
 
         try:
             data = await fut
         except:
             return AllGNFastCommands.transport.ConnectionError()
         
-        if data is not None:
-            r = GNResponse.deserialize(data)
-            return r
-        else:
-            return GNResponse('gn:client:0')
+        if data is None:
+            return AllGNFastCommands.transport.ConnectionError()
+
+        r = GNResponse.deserialize(data)
+        return r
         
     
     
@@ -553,10 +565,10 @@ class QuicClient:
                 await self._client_cm.__aexit__(None, None, None)
                 self._client_cm = None
 
-    async def asyncRequest(self, request: GNRequest) -> GNResponse:
+    async def asyncRequest(self, request: GNRequest, only_request: bool = False) -> GNResponse:
         if self._quik_core is None:
             raise RuntimeError("Not connected")
         
-        resp = await self._quik_core.request(request)
+        resp = await self._quik_core.request(request, only_request=only_request)
         return resp
 

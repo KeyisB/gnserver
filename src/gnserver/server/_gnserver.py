@@ -3,7 +3,7 @@ import os
 import sys
 from typing import Optional, Union, Callable, List, Tuple, Coroutine, cast
 from pathlib import Path
-from KeyisBTools.cryptography.bytes import userFriendly, hash3
+from KeyisBTools.bytes.transformation import userFriendly, hash3
 
 from KeyisBTools.models.serialization import deserialize
 from KeyisBTools.cryptography import m1
@@ -13,11 +13,11 @@ from ._models import DEPConfig
 
 
 class GNServer(App):
-    def __init__(self):
+    def __init__(self, only_client: bool = False):
         """
         # GNServer
         """
-        super().__init__()
+        super().__init__(only_client=only_client)
 
         self.vmhostConfig: dict = {}
         self.fromHostConfig = self.vmhostConfig
@@ -123,7 +123,7 @@ class GNServer(App):
         """
         # Запусить через VM-host
 
-        Заупскает сервер через процесс vm-host
+        Запускает сервер через процесс vm-host
         """
         argv = sys.argv[1:]
         data_enc = argv[0]
