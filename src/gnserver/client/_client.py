@@ -1,10 +1,11 @@
+import os
 import sys
 import time
 import asyncio
 import datetime
 from itertools import count
 from collections import deque
-from typing import Any, Dict, Deque, Tuple, Union, Optional, AsyncGenerator, Callable, Literal, AsyncIterable, overload, Coroutine, List, TYPE_CHECKING
+from typing import Any, Dict, Deque, Tuple, Union, Optional, AsyncGenerator, Callable, Literal, AsyncIterable, cast, overload, Coroutine, List, TYPE_CHECKING
 from aioquic.quic.events import QuicEvent, StreamDataReceived, StreamReset, ConnectionTerminated
 from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.connection import QuicConnection
@@ -17,11 +18,14 @@ from gnobjects.net.objects import GNRequest, GNResponse, Url
 from gnobjects.net.fastcommands import AllGNFastCommands
 from gnobjects.net.domains import GNDomain
 
-from .._crt import crt_client
+from .._crt import crt_client, ml_kem_crt_client
 from .._kdc_object import KDCObject
 from ..server._datagram_enc import QuicProtocolShell, ConnectionEncryptor
 from ._client_quic_shell import connect
 
+
+# os.environ['OQS_INSTALL_PATH'] = str((Path(__file__).parent / ".." / "oqs").resolve())
+# from ..oqs import Signature as OQSSignature, KeyEncapsulation as OQSKeyEncapsulation
 
 if TYPE_CHECKING:
     from ..server._app import App
@@ -52,7 +56,7 @@ async def chain_async(first_item, rest: AsyncIterable) -> AsyncGenerator:
 L1 - Physical
 L2 - MAC
 L3 - IP
-L4 - TCP/UDP
+L4 - UDP
 L5 - quic(packet managment)
 L6 - GN(protocol managment)
 """
@@ -332,7 +336,8 @@ class AsyncClient:
             result = r1
         return result
 
-    
+    # def upgradeConnection(self, domain: str, alg: str): pass
+
 
 
 class RawQuicClient(QuicProtocolShell):
@@ -354,6 +359,8 @@ class RawQuicClient(QuicProtocolShell):
         self._last_activity = time.time()
         self._running = True
         self._ping_id_gen = count(1)
+
+        self._connection_upgrades: List[str] = []
 
     def _activity(self):
         self._last_activity = time.time()
@@ -383,7 +390,7 @@ class RawQuicClient(QuicProtocolShell):
                 self._inflight.pop(event.stream_id, None)
                 data = bytes(self._buffer.pop(event.stream_id, b""))
 
-                self._loop.create_task(self._client._client.server.dispatchRequest(GNRequest.deserialize(data)))
+                self._loop.create_task(self._client._client.server.dispatchRequest(cast(GNRequest, self._deserialize(data, True))))
 
             else:
                 if not isinstance(handler, asyncio.Queue):
@@ -449,7 +456,7 @@ class RawQuicClient(QuicProtocolShell):
     async def request(self, request: GNRequest, only_request: bool = False):
     
         await self._resolve_requests_transport(request)
-        blob = await request.serialize()
+        blob = await self._serialize(request)
 
         sid = self._quic.get_next_available_stream_id()
 
@@ -472,11 +479,37 @@ class RawQuicClient(QuicProtocolShell):
         if data is None:
             return AllGNFastCommands.transport.ConnectionError()
 
-        r = GNResponse.deserialize(data)
+        r = self._deserialize(data, False)
         return r
+    
+
+    async def _serialize(self, d: Union[GNRequest, GNResponse]) -> bytes:
+        #TODO
         
-    
-    
+        
+        if isinstance(d, GNRequest):
+            return await d.serialize()
+        return d.serialize()
+            
+
+    def _deserialize(self, b: bytes, req: bool) -> Union[GNRequest, GNResponse]:
+        #TODO
+        
+        if req:
+            return GNRequest.deserialize(b)
+        return GNResponse.deserialize(b)
+        
+    # def _upgradeConnection(self, alg: str, later: bool = True) -> None:
+    #     if alg not in self._connection_upgrades:
+    #         self._connection_upgrades.append(alg)
+    #         if not later:
+    #             self.__upgradeConnection(alg)
+
+    # def __upgradeConnection(self, alg:str) -> None:
+    #     if alg == 'ML-KEM:M1':
+    #         kem = OQSKeyEncapsulation("ML-KEM-1024")
+    #         ciphertext, shared_secret = kem.encap_secret(ml_kem_crt_client)
+    #         kem.free()
         
 
 class QuicClient:
