@@ -9,9 +9,8 @@ import traceback
 import socket
 import datetime
 import logging
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union, AsyncGenerator, Awaitable, cast, Coroutine, Literal, ParamSpec, Concatenate, TypeVar
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union, AsyncGenerator, cast, Coroutine, ParamSpec, Concatenate, TypeVar
 from aioquic.asyncio.server import QuicServer
-from aioquic.asyncio.protocol import QuicConnectionProtocol
 from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.events import QuicEvent, StreamDataReceived
 from typing import Any, AsyncGenerator, Union
@@ -27,13 +26,12 @@ from gnobjects.net.objects import GNRequest, GNResponse, FileObject, CORSObject,
 from gnobjects.net.fastcommands import AllGNFastCommands, GNFastCommand, AllGNFastCommands as responses
 
 from KeyisBTools.bytes.transformation import userFriendly
-from KeyisBTools.models.serialization import serialize, deserialize
+from KeyisBTools.models.serialization import deserialize
 
 
 from ._func_params_validation import register_schema_by_key, validate_params_by_key
 from ._cors_resolver import resolve_cors
 from ._routes import Route, _compile_path, _ensure_async, _convert_value
-from .._kdc_object import KDCObject
 from ..client._client import AsyncClient
 
 from ._datagram_enc import QuicProtocolShell, DatagramEndpoint
@@ -270,7 +268,7 @@ class App:
 
 
     def fastFile(self, path: str, file_path: str, cache: Optional[CacheConfig] = None, cors: Optional[CORSObject] = None, inType: Optional[str] = None):
-        @self.get(path)
+        @self.get(path)  # type: ignore
         async def r_static():
             nonlocal file_path
             if file_path.endswith('/'):
@@ -283,7 +281,7 @@ class App:
             return responses.ok(TempDataObject('static', path=path, payload=fileObject, cache=cache, cors=cors, inType=inType))
 
     def staticDir(self, path: str, dir_path: str, cache: Optional[CacheConfig] = None, cors: Optional[CORSObject] = None, inType: Optional[str] = None):
-        @self.get(f"{path}/{{_path:path}}")
+        @self.get(f"{path}/{{_path:path}}")  # type: ignore
         async def r_static(_path: str):
             file_path = os.path.join(dir_path, _path)
             
@@ -297,7 +295,7 @@ class App:
             return responses.ok(TempDataObject('static', path=f'{path}/{_path}', payload=fileObject, cache=cache, cors=cors, inType=inType))
 
     def routeObject(self, object: Union[TempDataObject, TempDataGroup]):
-        @self.route(object.method, object.path, route='tdo')
+        @self.route(object.method, object.path, route='tdo')  # type: ignore
         async def _r_static(request):
             return responses.ok(object)
 
@@ -464,7 +462,7 @@ class App:
 
             logger.debug(f'[>] [{request.client.domain}] Response: {request.method} {request.url} -> {response.command} {response.payload if len(str(response.payload)) < 256 else ''}')
             
-            await self.sendRawResponse(request.stream_id, response=response, end_stream=end_stream)
+            await self.sendRawResponse(request.stream_id, response=response, end_stream=end_stream)  # type: ignore
 
         async def sendRawResponse(self, stream_id: int, response: GNResponse, end_stream: bool = True):
             await response.assembly()
@@ -591,7 +589,7 @@ class App:
                 if isinstance(host, str):
                     if ',' in host:
                         host = cast(Tuple[str, str], tuple([x.strip() for x in host.split(',')]))
-                    host = (host,)
+                    host = (host,) # type: ignore
 
 
 
@@ -651,7 +649,7 @@ class App:
             self.run(
                 domain=data['domain'],
                 port=data['port'],
-                tls_certfile=data.get('cert_path'),
-                tls_keyfile=data.get('key_path'),
+                tls_certfile=data.get('cert_path'), # type: ignore
+                tls_keyfile=data.get('key_path'), # type: ignore
                 host=data.get('host', '0.0.0.0')
             )

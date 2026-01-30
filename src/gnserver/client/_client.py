@@ -549,7 +549,7 @@ class QuicClient:
             configuration=cfg,
             create_protocol=RawQuicClient,
             wait_connected=True,
-            encType=encType
+            encType=encType  # type: ignore
         )
 
         try:
@@ -603,5 +603,5 @@ class QuicClient:
             raise RuntimeError("Not connected")
         
         resp = await self._quik_core.request(request, only_request=only_request)
-        return resp
+        return resp  # type: ignore
 

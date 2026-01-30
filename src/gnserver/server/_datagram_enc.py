@@ -6,7 +6,7 @@ import socket
 from Crypto.Cipher import AES
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives import hashes
-from typing import Optional, Callable, Union, cast, List, Any, Dict
+from typing import Optional, Callable, Union, cast, List, Any
 from .._kdc_object import KDCObject
 from aioquic.asyncio.server import QuicServer
 from aioquic.quic.connection import QuicConnection
@@ -62,11 +62,11 @@ class ConnectionEncryptor:
 
     async def initByKeyid(self, encryption_type: int, keyid: Tuple[int, int]) -> str:
         self.encryption_type = encryption_type
-        await self.eEndpoint._kdc.requestKeyIfNotExist(keyid)
+        await self.eEndpoint._kdc.requestKeyIfNotExist(keyid) # type: ignore
 
         key = self.eEndpoint._kdc.getKey(keyid)
         
-        DestDomain = self.eEndpoint._kdc.getDomainById(keyid)
+        DestDomain = self.eEndpoint._kdc.getDomainById(keyid) # type: ignore
 
         if DestDomain is None:
             print('ERROR: 143.822')
@@ -102,7 +102,7 @@ class ConnectionEncryptor:
             print('ERROR: 143.823')
             raise Exception('ERROR: 143.823')
         
-        key = self.eEndpoint._kdc.getKey(self.keyid)
+        key = self.eEndpoint._kdc.getKey(self.keyid) # type: ignore
 
         self_domain = self.eEndpoint._kdc._client._domain
         
@@ -392,7 +392,7 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
         else:
             keyid = connectionEnc.keyid
 
-        p = self.construct_initial(self._default_encryption_type, keyid)
+        p = self.construct_initial(self._default_encryption_type, keyid) # type: ignore
 
         if self._default_encryption_type != 0:
             try:

@@ -55,7 +55,7 @@ async def connect(
     # 1. Create protocol_shell (your QuicProtocolShell)
     protocol_shell = create_protocol(
         quic=quic,
-        datagramEndpoint=None,   # временно
+        datagramEndpoint=None,   # временно  # type: ignore
         stream_handler=stream_handler,
         client=quicClient,
     )

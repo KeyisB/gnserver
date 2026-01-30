@@ -1,5 +1,8 @@
 # fast_validate.py
-import inspect, datetime, functools, threading
+import inspect
+import datetime
+import functools
+import threading
 from inspect import Parameter, _empty
 from typing import Any, Union, get_origin, get_args
 _NoneType = type(None)
@@ -39,7 +42,7 @@ def _compile_checker(ann: Any):
     Поддерживаются только типы из SerializableType.
     """
     if ann is _empty:
-        def chk(v):
+        def chk(v): # type: ignore
             if _serializable_ok(v):
                 return None
             return f"значение не SerializableType: {type(v).__name__}({v!r})"
@@ -49,7 +52,7 @@ def _compile_checker(ann: Any):
     if origin is Union:
         alts = tuple(_compile_checker(a) for a in get_args(ann))
         types_str = " | ".join(_ann_to_str(a) for a in get_args(ann))
-        def chk(v):
+        def chk(v): # type: ignore
             for c in alts:
                 if c(v) is None:
                     return None
@@ -78,7 +81,7 @@ def _compile_checker(ann: Any):
     if origin is list:
         (elem_t,) = get_args(ann) or (_empty,)
         elem_chk = _compile_checker(elem_t)
-        def chk(v):
+        def chk(v): # type: ignore
             if type(v) is not list:
                 return f"ожидался list, получено {type(v).__name__}({v!r})"
             i = 0
@@ -96,7 +99,7 @@ def _compile_checker(ann: Any):
     if origin is set:
         (elem_t,) = get_args(ann) or (_empty,)
         elem_chk = _compile_checker(elem_t)
-        def chk(v):
+        def chk(v): # type: ignore
             if type(v) is not set:
                 return f"ожидался set, получено {type(v).__name__}({v!r})"
             for x in v:
@@ -113,7 +116,7 @@ def _compile_checker(ann: Any):
         # Только Tuple[T, ...]
         if len(args) == 2 and args[1] is ...:
             elem_chk = _compile_checker(args[0])
-            def chk(v):
+            def chk(v): # type: ignore
                 if type(v) is not tuple:
                     return f"ожидался tuple, получено {type(v).__name__}({v!r})"
                 i = 0

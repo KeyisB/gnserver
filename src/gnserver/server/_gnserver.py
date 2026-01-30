@@ -1,13 +1,14 @@
 
 import os
 import sys
-from typing import Optional, Union, Callable, List, Tuple, Coroutine, cast
+from typing import Optional, Union, Callable, cast
 from pathlib import Path
 from KeyisBTools.bytes.transformation import userFriendly, hash3
 from KeyisBTools.models.serialization import deserialize
 from KeyisBTools.cryptography import m1
+from gnobjects.net.objects import Url
 
-from ._app import App, GNRequest, Url
+from ._app import App, GNRequest
 from ._models import DEPConfig
 
 
@@ -93,7 +94,7 @@ class GNServer(App):
 
         @self.addEventListener('start', move_to_start=True) # type: ignore
         async def _on_start():
-            await self.client._kdc.addServers(servers_keys=self.DEPConfig.start_kdc_passive_keys)
+            await self.client._kdc.addServers(servers_keys=self.DEPConfig.start_kdc_passive_keys) # type: ignore
 
 
         if 'tls_certfile' in gn_server_crt_ and 'tls_keyfile' in gn_server_crt_:

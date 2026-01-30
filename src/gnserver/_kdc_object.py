@@ -39,11 +39,11 @@ class KDCObject:
 
         self._domain: str = self._gn_crt_data['domain']
         self._kdc_domain: str = self._gn_crt_data['kdc_domain']
-        self._kdc_domain_id: str = (255, self._gn_crt_data['kdc_domain_id'])
+        self._kdc_domain_id: str = (255, self._gn_crt_data['kdc_domain_id']) # type: ignore
 
         
-        self._x_domain_keyId[self._kdc_domain] = self._kdc_domain_id
-        self._x_keyId_key[self._kdc_domain_id] = self._gn_crt_data['kdc_key']
+        self._x_domain_keyId[self._kdc_domain] = self._kdc_domain_id # type: ignore
+        self._x_keyId_key[self._kdc_domain_id] = self._gn_crt_data['kdc_key'] # type: ignore
         
 
         self._requested_domains = requested_domains
@@ -150,7 +150,7 @@ class KDCObject:
         if isinstance(domain_or_keyId, str):
             return self._x_keyId_key[self._x_domain_keyId[domain_or_keyId]]
         else:
-            return self._x_keyId_key.get(domain_or_keyId)
+            return self._x_keyId_key.get(domain_or_keyId) # type: ignore
 
     def getDomainById(self, keyId: int) -> Optional[str]:
         for d, k in self._x_domain_keyId.items():
@@ -159,7 +159,7 @@ class KDCObject:
         return None
     
     def getKeyIdByDomain(self, domain: str) -> Optional[int]:
-        return self._x_domain_keyId.get(domain)
+        return self._x_domain_keyId.get(domain) # type: ignore
 
     async def requestKeyIfNotExist(self, domain_or_keyId: Union[List[Union[str, int]], str, int]):
         if isinstance(domain_or_keyId, str):
