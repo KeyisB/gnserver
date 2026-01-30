@@ -99,7 +99,7 @@ class App:
             self._routes.append(
                 Route(
                     route,
-                    method.upper(),
+                    method,
                     path,
                     regex,
                     param_types,
@@ -171,7 +171,7 @@ class App:
         self, request: GNRequest
     ) -> Union[GNResponse, AsyncGenerator[GNResponse, None]]:
         path    = request.url.path
-        method  = request.method.upper()
+        method  = request.method
         cand    = {path, path.rstrip("/") or "/", f"{path}/"}
         allowed = set()
 

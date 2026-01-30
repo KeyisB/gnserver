@@ -1,3 +1,4 @@
 *.cpython-3*.pyc
 __pycache__/
 *.egg-info/
+pyproject.toml
