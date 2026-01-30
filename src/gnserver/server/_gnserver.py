@@ -4,11 +4,10 @@ import sys
 from typing import Optional, Union, Callable, List, Tuple, Coroutine, cast
 from pathlib import Path
 from KeyisBTools.bytes.transformation import userFriendly, hash3
-
 from KeyisBTools.models.serialization import deserialize
 from KeyisBTools.cryptography import m1
 
-from ._app import App
+from ._app import App, GNRequest, Url
 from ._models import DEPConfig
 
 
@@ -140,6 +139,10 @@ class GNServer(App):
 
                 wait=wait
             )
+
+            @self.addEventListener('start')
+            async def _ping():
+                await self.client.request(GNRequest('post', Url(f'gn://[::1]:{data['!vmhost_port']}/s/starting-complete')))
 
     def _readFromHostConfig(self, data: Optional[dict] = None):
         if data is None:
