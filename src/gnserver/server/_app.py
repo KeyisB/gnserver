@@ -113,16 +113,16 @@ class App:
         return decorator
 
     def get(self, path: str, *, cors: Optional[CORSObject] = None):
-        return self.route("GET", path, cors)
+        return self.route("get", path, cors)
 
     def post(self, path: str, *, cors: Optional[CORSObject] = None):
-        return self.route("POST", path, cors)
+        return self.route("post", path, cors)
 
     def put(self, path: str, *, cors: Optional[CORSObject] = None):
-        return self.route("PUT", path, cors)
+        return self.route("put", path, cors)
 
     def delete(self, path: str, *, cors: Optional[CORSObject] = None):
-        return self.route("DELETE", path, cors)
+        return self.route("delete", path, cors)
 
     def setRouteCors(self, cors: Optional[CORSObject] = None):
         self._cors = cors

@@ -319,7 +319,7 @@ class AsyncClient:
         else:
             domain_dns = 'api.dns.gn'
 
-        r1 = await self.request(GNRequest('GET', Url(f'gn://{domain_dns}/getIp?d={domain}'), payload=domain), keep_alive=keep_alive)
+        r1 = await self.request(GNRequest('get', Url(f'gn://{domain_dns}/getIp?d={domain}'), payload=domain), keep_alive=keep_alive)
 
         if not r1.command.ok:
             if raise_errors:

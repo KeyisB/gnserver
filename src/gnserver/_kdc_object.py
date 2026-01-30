@@ -132,7 +132,7 @@ class KDCObject:
 
     async def _requestKDC(self, domain_or_keyId: List[Union[str, int]]):
         print(f'RAW: start kdc request to [{domain_or_keyId}]')
-        rs = await self._client.request(GNRequest('GET', Url(f'gn://{self._kdc_domain}/api/sys/server/keys'),
+        rs = await self._client.request(GNRequest('get', Url(f'gn://{self._kdc_domain}/api/sys/server/keys'),
                                                 payload=domain_or_keyId), keep_alive=self._active_key_synchronization)
         print('RAW: END kdc request')
 
