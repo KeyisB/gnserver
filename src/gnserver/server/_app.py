@@ -24,6 +24,7 @@ R = TypeVar("R")
 
 from gnobjects.net.objects import GNRequest, GNResponse, FileObject, CORSObject, TempDataGroup, TempDataObject, CacheConfig
 from gnobjects.net.fastcommands import AllGNFastCommands, GNFastCommand, AllGNFastCommands as responses
+from gnobjects.net.objects import pack_payload, unpack_payload
 
 from KeyisBTools.bytes.transformation import userFriendly
 from KeyisBTools.models.serialization import deserialize
@@ -85,7 +86,7 @@ class App:
 
         self.connections: Dict[str, App._ServerProto] = {}
 
-    async def sendObject(self, domain:str, object: Union[TempDataObject, TempDataGroup], end_stream: bool = True):
+    async def sendObject(self, domain:str, object: Union[TempDataObject, TempDataGroup, GNRequest, GNResponse], end_stream: bool = True):
         a = self.connections.get(domain)
         if a is None:
             return
@@ -470,13 +471,20 @@ class App:
             self._quic.send_stream_data(stream_id, blob, end_stream=end_stream) # type: ignore
             self.transmit()
         
-        async def sendObject(self, object: Union[TempDataObject, TempDataGroup], end_stream: bool = True):
+        async def sendObject(self, object: Union[TempDataObject, TempDataGroup, GNRequest, GNResponse], end_stream: bool = True):
             if isinstance(object, TempDataGroup):
                 await object.assemble()
                 blob = object.serialize()
-            else:
+            elif isinstance(object, TempDataObject):
                 object.assemble()
                 blob = await object.serialize()
+            elif isinstance(object, GNRequest):
+                blob = await object.serialize()
+            elif isinstance(object, GNResponse):
+                await object.assembly()
+                blob = object.serialize()
+            else:
+                raise TypeError(f'Unsupported object type: {type(object)}')
             
             sid = self._quic.get_next_available_stream_id()
             self._quic.send_stream_data(sid, blob, end_stream=end_stream)

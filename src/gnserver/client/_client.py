@@ -14,7 +14,7 @@ import traceback
 import logging
 
 from KeyisBTools import TTLDict
-from gnobjects.net.objects import GNRequest, GNResponse, Url
+from gnobjects.net.objects import GNRequest, GNResponse, Url, unpack_payload
 from gnobjects.net.fastcommands import AllGNFastCommands
 from gnobjects.net.domains import GNDomain
 
@@ -390,8 +390,10 @@ class RawQuicClient(QuicProtocolShell):
                 self._inflight.pop(event.stream_id, None)
                 data = bytes(self._buffer.pop(event.stream_id, b""))
 
-                self._loop.create_task(self._client._client.server.dispatchRequest(cast(GNRequest, self._deserialize(data, True))))
-
+                u = unpack_payload(data)
+                if not isinstance(u, GNRequest):
+                    u = GNRequest('get', Url('gn://[::1]/'), payload=u, route=':receive') # type: ignore
+                self._loop.create_task(self._client._client.server.dispatchRequest(u))
             else:
                 if not isinstance(handler, asyncio.Queue):
                     buf = self._buffer.setdefault(event.stream_id, bytearray())
