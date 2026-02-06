@@ -188,7 +188,7 @@ def _build_schema_from_params(func_params) -> Schema:
     names = set()
     has_kwargs = False
     for name, p in pmap.items():
-        if name == "request":
+        if name in ("request", "proto"):
             continue
         if p.kind == Parameter.VAR_KEYWORD:
             has_kwargs = True; continue
