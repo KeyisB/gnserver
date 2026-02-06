@@ -472,14 +472,19 @@ class RawQuicClient(QuicProtocolShell):
 
         if only_request:
             return AllGNFastCommands.transport.NoResponse()
-
+        
+        print(f'Waiting for response on stream {sid}...')
         try:
             data = await fut
-        except:
+            print(f'Response received on stream {sid}, length: {len(data) if data else "None"} bytes')
+        except Exception as e:
+            print(traceback.format_exc())
             return AllGNFastCommands.transport.ConnectionError()
-        
+        print(f'Raw response data: {data[:100] if data else "None"}{"..." if data and len(data) > 100 else ""}')
         if data is None:
             return AllGNFastCommands.transport.ConnectionError()
+        
+        print(f'Deserializing response on stream {sid}...')
 
         r = self._deserialize(data, False)
         return r

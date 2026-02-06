@@ -169,7 +169,8 @@ class App:
                 func(*args, **call_kwargs)
 
     async def dispatchRequest(
-        self, request: GNRequest
+        self, request: GNRequest,
+        proto: Optional["_ServerProto"] = None
     ) -> Union[GNResponse, AsyncGenerator[GNResponse, None]]:
         path    = request.url.path
         method  = request.method
@@ -224,6 +225,9 @@ class App:
 
             if "request" in sig.parameters:
                 kw["request"] = request
+
+            if "proto" in sig.parameters:
+                kw["proto"] = proto
 
             if inspect.isasyncgenfunction(r.handler):
                 return r.handler(**kw)
@@ -363,7 +367,7 @@ class App:
 
             
             if self._domain is None:
-                asyncio.create_task(self.sendRawResponse(stream_id, GNResponse('error', {'error': 'domain not set'})))
+                asyncio.create_task(self.sendRawResponse(stream_id, GNResponse('error', {'error': f'domain not set {self._quic._network_paths[0].addr}'})))
                 return
             
             request.client._data['domain'] = self._domain
@@ -430,35 +434,38 @@ class App:
         async def _handle_request(self, request: GNRequest):
 
             try:
-                response = await self._api.dispatchRequest(request)
+                response = await self._api.dispatchRequest(request, self)
 
                 if inspect.isasyncgen(response):
                     async for chunk in response:  # type: ignore
                         chunk._stream = True
-                        await self._sendResponseFromRequest(request, chunk, False)
+                        await self.sendResponseFromRequest(request, chunk, False)
                         
                     resp = GNResponse('gn:end-stream')
                     resp._stream = True # type: ignore
 
-                    await self._sendResponseFromRequest(request, resp)
+                    await self.sendResponseFromRequest(request, resp)
                     return
 
                 if not isinstance(response, GNResponse):
-                    await self._sendResponseFromRequest(request, AllGNFastCommands.InternalServerError('Invalid response'))
+                    await self.sendResponseFromRequest(request, AllGNFastCommands.InternalServerError('Invalid response'))
                     return
 
-                await self._sendResponseFromRequest(request, response)
+                await self.sendResponseFromRequest(request, response)
             except Exception as e:
                 if isinstance(e, (GNRequest, GNFastCommand)):
-                    await self._sendResponseFromRequest(request, e)
+                    await self.sendResponseFromRequest(request, e)
                 else:
                     logger.error('InternalServerError:\n'  + traceback.format_exc())
 
-                    await self._sendResponseFromRequest(request, AllGNFastCommands.InternalServerError())
+                    await self.sendResponseFromRequest(request, AllGNFastCommands.InternalServerError())
             
 
         
-        async def _sendResponseFromRequest(self, request: GNRequest, response: GNResponse, end_stream: bool = True):
+        async def sendResponseFromRequest(self, request: GNRequest, response: GNResponse, end_stream: bool = True):
+            """
+            Отправляет ответ клиенту. Клиент получит ответ на тот же stream_id, что и запрос. Закрывая запрос.
+            """
             await self._resolve_dev_transport_response(response, request)
 
             logger.debug(f'[>] [{request.client.domain}] Response: {request.method} {request.url} -> {response.command} {response.payload if len(str(response.payload)) < 256 else ''}')
