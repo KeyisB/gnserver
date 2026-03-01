@@ -41,10 +41,16 @@ class KDCObject:
         self._kdc_domain: str = self._gn_crt_data['kdc_domain']
         self._kdc_domain_id: str = (255, self._gn_crt_data['kdc_domain_id']) # type: ignore
 
-        
+        self._second_kdc_domain: Optional[str] = self._gn_crt_data.get('second_kdc_domain')
+        self._second_kdc_domain_id: Optional[Tuple[int, int]] = (255, self._gn_crt_data['second_kdc_domain_id']) if self._gn_crt_data.get('second_kdc_domain_id') else None
+
         self._x_domain_keyId[self._kdc_domain] = self._kdc_domain_id # type: ignore
         self._x_keyId_key[self._kdc_domain_id] = self._gn_crt_data['kdc_key'] # type: ignore
-        
+
+        if self._second_kdc_domain is not None and self._second_kdc_domain_id is not None:
+            self._x_domain_keyId[self._second_kdc_domain] = self._second_kdc_domain_id # type: ignore
+            self._x_keyId_key[self._second_kdc_domain_id] = self._gn_crt_data['second_kdc_key'] # type: ignore
+
 
         self._requested_domains = requested_domains
         self._active_key_synchronization = active_key_synchronization
@@ -86,7 +92,7 @@ class KDCObject:
         if len(self._requested_domains) > 0:
             await self.requestKDC(self._requested_domains) # type: ignore
 
-    async def requestKDC(self, domain_or_keyId: Union[str, int, List[Union[str, int]]]):
+    async def requestKDC(self, domain_or_keyId: Union[str, Tuple[int, int], List[Union[str, Tuple[int, int]]]]):
 
         if not isinstance(domain_or_keyId, list):
             domain_or_keyId = [domain_or_keyId]
@@ -130,9 +136,17 @@ class KDCObject:
             self._x_keyId_key[keyId] = key
             print(f'KDC: Добавлены ключи domain: {domain}, keyId: {keyId}')
 
-    async def _requestKDC(self, domain_or_keyId: List[Union[str, int]]):
+    async def _requestKDC(self, domain_or_keyId: List[Union[str, Tuple[int, int]]]):
         print(f'RAW: start kdc request to [{domain_or_keyId}]')
-        rs = await self._client.request(GNRequest('get', Url(f'gn://{self._kdc_domain}/api/sys/server/keys'),
+
+        
+        if not isinstance(domain_or_keyId[0], str) and domain_or_keyId[0][0] == 251:
+            # второй KDC
+            d = self._second_kdc_domain
+        else:
+            d = self._kdc_domain
+
+        rs = await self._client.request(GNRequest('get', Url(f'gn://{d}/api/sys/server/keys'),
                                                 payload=domain_or_keyId), keep_alive=self._active_key_synchronization)
         print('RAW: END kdc request')
 
@@ -161,7 +175,7 @@ class KDCObject:
     def getKeyIdByDomain(self, domain: str) -> Optional[int]:
         return self._x_domain_keyId.get(domain) # type: ignore
 
-    async def requestKeyIfNotExist(self, domain_or_keyId: Union[List[Union[str, int]], str, int]):
+    async def requestKeyIfNotExist(self, domain_or_keyId: Union[List[Union[str, Tuple[int, int]]], str, Tuple[int, int]]):
         if isinstance(domain_or_keyId, str):
             if domain_or_keyId not in self._x_domain_keyId:
                 await self.requestKDC(domain_or_keyId)

@@ -9,7 +9,7 @@ import traceback
 import socket
 import datetime
 import logging
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union, AsyncGenerator, cast, Coroutine, ParamSpec, Concatenate, TypeVar
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union, AsyncGenerator, cast, Coroutine, ParamSpec, Concatenate, TypeVar, Literal
 from aioquic.asyncio.server import QuicServer
 from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.events import QuicEvent, StreamDataReceived
@@ -65,6 +65,8 @@ formatter = logging.Formatter(
 console.setFormatter(formatter)
 
 logger.addHandler(console)
+
+_Name = Union[Literal['start'], str]
 
 
 class App:
@@ -133,7 +135,7 @@ class App:
         if self._datagramEndpoint is not None:
             self._datagramEndpoint.DEPConfig = config
 
-    def addEventListener(self, name: str, * , move_to_start: bool = False) -> Callable[[Callable[P, Coroutine[Any, Any, R]]], Callable[P, Coroutine[Any, Any, R]]]:
+    def addEventListener(self, name: _Name | str, * , move_to_start: bool = False) -> Callable[[Callable[P, Coroutine[Any, Any, R]]], Callable[P, Coroutine[Any, Any, R]]]:
         def decorator(fn: Callable[P, Coroutine[Any, Any, R]]):
             events = self._events.get(name, [])
             events.append({

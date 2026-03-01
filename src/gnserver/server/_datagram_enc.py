@@ -62,11 +62,11 @@ class ConnectionEncryptor:
 
     async def initByKeyid(self, encryption_type: int, keyid: Tuple[int, int]) -> str:
         self.encryption_type = encryption_type
-        await self.eEndpoint._kdc.requestKeyIfNotExist(keyid) # type: ignore
+        await self.eEndpoint._kdc.requestKeyIfNotExist(keyid)
 
         key = self.eEndpoint._kdc.getKey(keyid)
         
-        DestDomain = self.eEndpoint._kdc.getDomainById(keyid) # type: ignore
+        DestDomain = self.eEndpoint._kdc.getDomainById(keyid)
 
         if DestDomain is None:
             print('ERROR: 143.822')
