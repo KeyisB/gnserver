@@ -20,6 +20,8 @@ class KDCObject:
         self._encryption_type: Dict[Union[str, int], int] = {}
         self._domain_hkdf_cache: Dict[Tuple[int, str], bytes] = {}
 
+        self.second_kdc_domains_patterns: Optional[DomainMatcherList] = None
+
     def init(self,
              gn_crt: Optional[Union[bytes, str, Path, dict]] = None,
              requested_domains: List[str] = [],
@@ -144,6 +146,9 @@ class KDCObject:
             # второй KDC
             d = self._second_kdc_domain
         else:
+            if self.second_kdc_domains_patterns is not None:
+                if self.second_kdc_domains_patterns.match_any(cast(str, domain_or_keyId[0])):
+                    d = self._second_kdc_domain
             d = self._kdc_domain
 
         rs = await self._client.request(GNRequest('get', Url(f'gn://{d}/api/sys/server/keys'),
