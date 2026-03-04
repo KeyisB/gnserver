@@ -135,7 +135,7 @@ class AsyncClient:
             c = self._active_connections[domain]
             if c.status == 'connecting':
                 try:
-                    await asyncio.wait_for(c.connect_future, reconnect_wait or self._configuration.get('L5', {}).get('connection', {}).get())
+                    await asyncio.wait_for(c.connect_future, reconnect_wait or self._configuration.get('L5', {}).get('connection', {}).get('connect_timeout', 10))
                     if c.status == 'active':
                         return c
                     elif c.status == 'connecting':
@@ -162,7 +162,9 @@ class AsyncClient:
 
         c._disconnect_signal = f # type: ignore
         try:
-            await c.connect(data[0], data[1], keep_alive=keep_alive)
+            await asyncio.wait_for(c.connect(data[0], data[1], keep_alive=keep_alive), reconnect_wait or self._configuration.get('L5', {}).get('connection', {}).get('connect_timeout', 10))
+        except asyncio.exceptions.TimeoutError:
+            raise AllGNFastCommands.transport.QuicHandshakeTimeout('Не удалось подключится к серверу (таймаут рукопожатия)')
         except asyncio.exceptions.CancelledError:
             raise AllGNFastCommands.transport.ConnectionError('Не удалось подключится к серверу')
         except:

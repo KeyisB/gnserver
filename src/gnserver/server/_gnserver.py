@@ -77,6 +77,7 @@ class GNServer(App):
     ):
         
         self.domain = domain
+
         if dep_config is not None:
             self.setDEPConfig(dep_config)
         
@@ -152,6 +153,9 @@ class GNServer(App):
 
             data = deserialize(userFriendly.decode(data_enc)) # type: ignore
 
+            
+        self.domain = data.get('domain', self.domain)
+
         if not isinstance(data, dict):
             raise Exception('data is not dict')
 
@@ -166,3 +170,4 @@ class GNServer(App):
                 raise Exception('vmhostConfig is not dict')
 
             self.vmhostConfig.update(_vmhostConfig)
+
