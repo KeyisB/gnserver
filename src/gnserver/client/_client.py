@@ -144,9 +144,9 @@ class AsyncClient:
                         return c
                     elif c.status == 'connecting':
                         await self.disconnect(domain)
-                        raise AllGNFastCommands.transport.SendTimeout()
+                        raise AllGNFastCommands.transport.SendTimeout(f'Не удалось отправить запрос (таймаут соединения) с сервером {domain}')
                     elif c.status == 'disconnect':
-                        raise AllGNFastCommands.transport.ConnectionError()
+                        raise AllGNFastCommands.transport.ConnectionError(f'Не удалось подключится к серверу {domain}')
                 except:
                     await self.disconnect(domain)
             else:
@@ -168,11 +168,11 @@ class AsyncClient:
         try:
             await asyncio.wait_for(c.connect(data[0], data[1], keep_alive=keep_alive), reconnect_wait or self._configuration.get('L5', {}).get('connection', {}).get('connect_timeout', 10))
         except asyncio.exceptions.TimeoutError:
-            raise AllGNFastCommands.transport.QuicHandshakeTimeout('Не удалось подключится к серверу (таймаут рукопожатия)')
+            raise AllGNFastCommands.transport.QuicHandshakeTimeout(f'Не удалось подключится к серверу {domain} (таймаут рукопожатия)')
         except asyncio.exceptions.CancelledError:
-            raise AllGNFastCommands.transport.ConnectionError('Не удалось подключится к серверу')
+            raise AllGNFastCommands.transport.ConnectionError(f'Не удалось подключится к серверу {domain}')
         except:
-            raise AllGNFastCommands.transport.ConnectionError()
+            raise AllGNFastCommands.transport.ConnectionError(f'Не удалось подключится к серверу {domain}')
 
 
         await c.connect_future
@@ -282,6 +282,7 @@ class AsyncClient:
         if AsyncClient._usercoredns_ is not None:
             p = AsyncClient._usercoredns_
             AsyncClient._usercoredns_ = None
+            self._kdc.setDomainEcryptionType(AsyncClient._dns_core__domain, 0)
             d: str = await self.getDNS(p, use_cache=False, keep_alive=False, raise_errors=True) # type: ignore
 
             AsyncClient._dns_core__domain = p
