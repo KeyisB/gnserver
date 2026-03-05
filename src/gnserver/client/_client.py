@@ -253,6 +253,7 @@ class AsyncClient:
         ip, port = Url.ipv6_with_port_to_ipv6_and_port(data)
 
         await c.connect(ip, port, keep_alive=keep_alive)
+        await c.ready
 
         if c.status != 'active':
             raise AllGNFastCommands.transport.ConnectionError(
@@ -678,6 +679,8 @@ class QuicClient:
 
         self.connect_future = asyncio.get_event_loop().create_future()
 
+        self.ready = asyncio.get_running_loop().create_future()
+
     async def connect(self, ip: str, port: int, keep_alive: bool = True):
         self.status = 'connecting'
         cfg = QuicConfiguration(is_client=True, alpn_protocols=["gn:backend"])
@@ -709,11 +712,19 @@ class QuicClient:
             self._quik_core = await self._client_cm.__aenter__()  # type: ignore
             self._quik_core.quicClient = self
 
+            self.status = 'active'
+
+
+            if not self.ready.done():
+                self.ready.set_result(True)
+
             if keep_alive:
                 asyncio.create_task(self._quik_core._keepalive_loop())
 
-            self.status = 'active'
-        except Exception:
+        except Exception as e:
+            if not self.ready.done():
+                self.ready.set_exception(e)
+
             self.status = 'disconnect'
             try:
                 if self._client_cm is not None:
@@ -753,10 +764,13 @@ class QuicClient:
                 await self._client_cm.__aexit__(None, None, None)
                 self._client_cm = None
 
-    async def asyncRequest(self, request: GNRequest, only_request: bool = False) -> GNResponse:
-        if self._quik_core is None:
-            raise RuntimeError("Not connected")
-        
-        resp = await self._quik_core.request(request, only_request=only_request)
-        return resp  # type: ignore
 
+
+    async def asyncRequest(self, request: GNRequest, only_request: bool = False):
+        if self.status != 'active':
+            await self.ready
+            if self.status != 'active':
+                raise RuntimeError("Connection not active")
+
+        resp = await self._quik_core.request(request, only_request=only_request)
+        return resp
