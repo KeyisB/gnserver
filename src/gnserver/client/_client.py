@@ -299,48 +299,93 @@ class AsyncClient:
 
         return request
 
-    async def request(self, request: GNRequest, keep_alive: bool = True, restart_connection: bool = False, reconnect_wait: float = 10, only_request: bool = False) -> GNResponse:
+    async def request(
+        self,
+        request: GNRequest,
+        keep_alive: bool = True,
+        restart_connection: bool = False,
+        reconnect_wait: float = 10,
+        only_request: bool = False
+    ) -> GNResponse:
 
         print(f'Request: {request.method} {request.url}')
 
         if isinstance(request, GNRequest):
-            
+
             request = await self._resolve_requests_transport(request)
-            try:
-                c = await self.connect(request, restart_connection, reconnect_wait, keep_alive=keep_alive)
-            except BaseException as e:
-                if isinstance(e, GNResponse):
-                    return e
-                else:
+
+            domain = request.url.hostname
+
+            for attempt in range(2):
+
+                try:
+                    c = await self.connect(
+                        request,
+                        restart_connection if attempt == 0 else True,
+                        reconnect_wait,
+                        keep_alive=keep_alive
+                    )
+
+                except BaseException as e:
+                    if isinstance(e, GNResponse):
+                        return e
                     return GNResponse(str(e), payload=traceback.format_exc())
 
+                for f in self.__request_callbacks.values():
+                    asyncio.create_task(f(request))
 
-            for f in self.__request_callbacks.values():
-                asyncio.create_task(f(request))
-            r = await c.asyncRequest(request, only_request=only_request)
-            logger.debug(f'Response: {request.method} {request.url} -> {r.command} {r.payload if len(str(r.payload)) < 512 else f'len({len(str(r.payload))})'}')
+                try:
+                    r = await c.asyncRequest(request, only_request=only_request)
 
-            for f in self.__response_callbacks.values():
-                asyncio.create_task(f(r))
+                except RuntimeError as e:
 
-            return r
-        
+                    # connection умер между connect и send
+                    if "Connection not active" in str(e) and attempt == 0:
+
+                        try:
+                            await self.disconnect(domain)
+                        except Exception:
+                            pass
+
+                        continue
+
+                    return GNResponse(str(e), payload=traceback.format_exc())
+
+                logger.debug(
+                    f'Response: {request.method} {request.url} -> {r.command} '
+                    f'{r.payload if len(str(r.payload)) < 512 else f"len({len(str(r.payload))})"}'
+                )
+
+                for f in self.__response_callbacks.values():
+                    asyncio.create_task(f(r))
+
+                return r
+
+            return GNResponse("connection failed")
+
         else:
 
             c: Optional[QuicClient] = None
 
             async def wrapped(request) -> AsyncGenerator[GNRequest, None]:
                 async for req in request:
+
                     if req.gn_protocol is None:
                         req.setGNProtocol(self.__current_session['protocols'][0])
+
                     req._stream = True
 
                     for f in self.__request_callbacks.values():
                         asyncio.create_task(f(req))
 
                     nonlocal c
-                    if c is None:  # инициализируем при первом req
-                        c = await self.connect(request, restart_connection, reconnect_wait, keep_alive=keep_alive)
+                    if c is None:
+                        c = await self.connect(
+                            request,
+                            restart_connection,
+                            reconnect_wait,
+                            keep_alive=keep_alive
+                        )
 
                     yield req
 
@@ -757,10 +802,14 @@ class QuicClient:
 
 
     async def asyncRequest(self, request: GNRequest, only_request: bool = False):
-        if self.status != 'active':
-            await self.ready
-            if self.status != 'active':
-                raise RuntimeError("Connection not active")
 
-        resp = await self._quik_core.request(request, only_request=only_request)
-        return resp
+        if self._quik_core is None or self.status != "active":
+            raise AllGNFastCommands.transport.ConnectionError("Connection lost")
+
+        try:
+            resp = await self._quik_core.request(request, only_request=only_request)
+            return resp
+
+        except Exception:
+            self.status = "disconnect"
+            raise AllGNFastCommands.transport.ConnectionError("Connection lost")
