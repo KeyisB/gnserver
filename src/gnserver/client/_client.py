@@ -159,109 +159,99 @@ class AsyncClient:
         restart_connection: bool = False,
         reconnect_wait: float = 10,
         keep_alive: bool = True
-    ) -> 'QuicClient':
+    ) -> "QuicClient":
+
         domain = request.url.hostname
-        timeout = self._connect_timeout(reconnect_wait)
 
         # fast path
         if not restart_connection:
-            c = self._active_connections.get(domain)
-            if c is not None and c.status == 'active':
-                return c
+            conn = self._active_connections.get(domain)
+            if conn and conn.status == "active":
+                return conn
 
-            t = self._connect_tasks.get(domain)
-            if t is not None:
-                return await asyncio.wait_for(asyncio.shield(t), timeout)
+            task = self._connect_tasks.get(domain)
+            if task:
+                return await task
 
         lock = self._get_connect_lock(domain)
 
         async with lock:
-            # second check under lock
+
+            # second check
             if not restart_connection:
-                c = self._active_connections.get(domain)
-                if c is not None and c.status == 'active':
-                    return c
+                conn = self._active_connections.get(domain)
+                if conn and conn.status == "active":
+                    return conn
 
-                t = self._connect_tasks.get(domain)
-                if t is not None:
-                    return await asyncio.wait_for(asyncio.shield(t), timeout)
+                task = self._connect_tasks.get(domain)
+                if task:
+                    return await task
 
-            else:
-                # restart requested: fully drop current connection/task
-                old_task = self._connect_tasks.pop(domain, None)
-                if old_task is not None and not old_task.done():
-                    old_task.cancel()
+            # restart connection
+            if restart_connection:
 
-                old_conn = self._active_connections.get(domain)
-                if old_conn is not None:
+                task = self._connect_tasks.pop(domain, None)
+                if task and not task.done():
+                    task.cancel()
+
+                conn = self._active_connections.pop(domain, None)
+                if conn:
                     try:
-                        await old_conn.disconnect()
+                        await conn.disconnect()
                     except Exception:
                         pass
-                    self._active_connections.pop(domain, None)
 
+            # create new connect task
             task = asyncio.create_task(
-                self._connect_impl(
-                    domain=domain,
-                    request=request,
-                    keep_alive=keep_alive,
-                )
+                self._connect_impl(domain, request, keep_alive)
             )
+
             self._connect_tasks[domain] = task
 
         try:
-            return await asyncio.wait_for(asyncio.shield(task), timeout)
-        except asyncio.TimeoutError as e:
-            await self._cleanup_failed_connect(domain, task)
-            raise AllGNFastCommands.transport.QuicHandshakeTimeout(
-                f'Не удалось подключится к серверу {domain} (таймаут рукопожатия)'
-            ) from e
-        except asyncio.CancelledError as e:
-            await self._cleanup_failed_connect(domain, task)
-            raise AllGNFastCommands.transport.ConnectionError(
-                f'Не удалось подключится к серверу {domain}'
-            ) from e
-        except GNResponse:
-            raise
-        except Exception as e:
-            await self._cleanup_failed_connect(domain, task)
-            raise AllGNFastCommands.transport.ConnectionError(
-                f'Не удалось подключится к серверу {domain}'
-            ) from e
+            conn = await task
+            return conn
 
-    async def _connect_impl(
-        self,
-        domain: str,
-        request: GNRequest,
-        keep_alive: bool
-    ) -> 'QuicClient':
-        c = QuicClient(self, domain)
+        except Exception:
 
-        def on_disconnect(domain_: str):
-            current = self._active_connections.get(domain_)
-            if current is c:
-                self._active_connections.pop(domain_, None)
+            # cleanup
+            if self._connect_tasks.get(domain) is task:
+                self._connect_tasks.pop(domain, None)
 
-        c._disconnect_signal = on_disconnect  # type: ignore
+            conn = self._active_connections.pop(domain, None)
+            if conn:
+                try:
+                    await conn.disconnect()
+                except Exception:
+                    pass
 
-        # ВАЖНО: DNS до публикации active connection, но task уже общая
+            raise AllGNFastCommands.transport.ConnectionError(f"Failed to connect to {domain}")
+
+    async def _connect_impl(self, domain, request, keep_alive):
+
         data = await self.getDNS(
             domain,
             raise_errors=True,
             host=domain if request.url.isIp else None
         )
+
         ip, port = Url.ipv6_with_port_to_ipv6_and_port(data)
 
-        await c.connect(ip, port, keep_alive=keep_alive)
-        await c.ready
+        conn = QuicClient(self, domain)
 
-        if c.status != 'active':
-            raise AllGNFastCommands.transport.ConnectionError(
-                f'Не удалось подключится к серверу {domain}'
-            )
+        def on_disconnect(d):
+            self._active_connections.pop(d, None)
 
-        self._active_connections[domain] = c
-        return c
+        conn._disconnect_signal = on_disconnect
+
+        await conn.connect(ip, port, keep_alive=keep_alive)
+
+        if conn.status != "active":
+            raise AllGNFastCommands.transport.ConnectionError(f"Failed to connect to {domain}")
+
+        self._active_connections[domain] = conn
+
+        return conn
 
     async def _cleanup_failed_connect(self, domain: str, task: asyncio.Task) -> None:
         current_task = self._connect_tasks.get(domain)
