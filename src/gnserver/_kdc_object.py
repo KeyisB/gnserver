@@ -141,15 +141,18 @@ class KDCObject:
     async def _requestKDC(self, domain_or_keyId: List[Union[str, Tuple[int, int]]]):
         print(f'RAW: start kdc request to [{domain_or_keyId}]')
 
-        
-        if not isinstance(domain_or_keyId[0], str) and domain_or_keyId[0][0] == 251:
-            # второй KDC
-            d = self._second_kdc_domain
-        else:
+        d = self._kdc_domain
+
+        if all(isinstance(d, str) for d in domain_or_keyId): # List[str]
             if self.second_kdc_domains_patterns is not None:
                 if self.second_kdc_domains_patterns.match_any(cast(str, domain_or_keyId[0])):
                     d = self._second_kdc_domain
-            d = self._kdc_domain
+            
+        else: # List[Tuple[int, int]]
+            if domain_or_keyId[0][0] == 251:
+                # тип ключа 251 это для использования глобального kdc
+                d = self._second_kdc_domain
+            
 
         rs = await self._client.request(GNRequest('get', Url(f'gn://{d}/api/sys/server/keys'),
                                                 payload=domain_or_keyId), keep_alive=self._active_key_synchronization)
