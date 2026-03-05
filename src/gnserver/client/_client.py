@@ -61,11 +61,12 @@ L5 - quic(packet managment)
 L6 - GN(protocol managment)
 """
 
+from ._values import _c
 
 class AsyncClient:
     def __init__(self, server: Optional['App'] = None):
         self.server = server
-        self.__dns_core__ipv4 = Url.ipv4_with_port_to_ipv6_with_port('85.198.86.175:55713')
+        self.__dns_core__ipv4 = _c['dns_core__ipv6']
         self.__dns_gn__ipv4: Optional[str] = None
 
         self.__current_session = {}

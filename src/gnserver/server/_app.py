@@ -22,7 +22,7 @@ from aioquic.quic.events import (
 P = ParamSpec("P")
 R = TypeVar("R")
 
-from gnobjects.net.objects import GNRequest, GNResponse, FileObject, CORSObject, TempDataGroup, TempDataObject, CacheConfig
+from gnobjects.net.objects import GNRequest, GNResponse, FileObject, CORSObject, TempDataGroup, TempDataObject
 from gnobjects.net.fastcommands import AllGNFastCommands, GNFastCommand, AllGNFastCommands as responses
 from gnobjects.net.objects import pack_payload, unpack_payload
 
@@ -274,7 +274,7 @@ class App:
         raise AllGNFastCommands.NotFound()
 
 
-    def fastFile(self, path: str, file_path: str, cache: Optional[CacheConfig] = None, cors: Optional[CORSObject] = None, inType: Optional[str] = None):
+    def fastFile(self, path: str, file_path: str, cors: Optional[CORSObject] = None, inType: Optional[str] = None):
         @self.get(path)  # type: ignore
         async def r_static():
             nonlocal file_path
@@ -285,9 +285,13 @@ class App:
                 raise AllGNFastCommands.NotFound()
 
             fileObject = FileObject(file_path)
-            return responses.ok(TempDataObject('static', path=path, payload=fileObject, cache=cache, cors=cors, inType=inType))
+            d, m = await fileObject.assembly()
+            return responses.ok({
+                'data': d,
+                'mime-type': m
+            })
 
-    def staticDir(self, path: str, dir_path: str, cache: Optional[CacheConfig] = None, cors: Optional[CORSObject] = None, inType: Optional[str] = None):
+    def staticDir(self, path: str, dir_path: str, cors: Optional[CORSObject] = None, inType: Optional[str] = None):
         @self.get(f"{path}/{{_path:path}}")  # type: ignore
         async def r_static(_path: str):
             file_path = os.path.join(dir_path, _path)
@@ -299,7 +303,12 @@ class App:
                 raise AllGNFastCommands.NotFound()
             
             fileObject = FileObject(file_path)
-            return responses.ok(TempDataObject('static', path=f'{path}/{_path}', payload=fileObject, cache=cache, cors=cors, inType=inType))
+            d, m = await fileObject.assembly()
+            return responses.ok({
+                'data': d,
+                'mime-type': m
+            })
+
 
     def routeObject(self, object: Union[TempDataObject, TempDataGroup]):
         @self.route(object.method, object.path, route='tdo')  # type: ignore
