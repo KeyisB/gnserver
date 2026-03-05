@@ -45,6 +45,12 @@ class KDCObject:
 
         self._second_kdc_domain: Optional[str] = self._gn_crt_data.get('second_kdc_domain')
         self._second_kdc_domain_id: Optional[Tuple[int, int]] = (255, self._gn_crt_data['second_kdc_domain_id']) if self._gn_crt_data.get('second_kdc_domain_id') else None
+        # 255, потому что это ключ к kdc. там не 251, даже для второго
+
+        # если запросим второй kdc, а в crt только 1, то попробуем прокинуть первый как второй. Упрощение для core серверов.
+        if self._second_kdc_domain is None and self._second_kdc_domain_id is None:
+            self._second_kdc_domain = self._kdc_domain
+            self._second_kdc_domain_id = self._kdc_domain_id
 
         self._x_domain_keyId[self._kdc_domain] = self._kdc_domain_id # type: ignore
         self._x_keyId_key[self._kdc_domain_id] = self._gn_crt_data['kdc_key'] # type: ignore
