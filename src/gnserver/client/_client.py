@@ -67,6 +67,9 @@ class AsyncClient:
     _dns_core__ipv6 = _c['dns_core__ipv6']
     _dns_core__domain = _c['dns_core__domain']
 
+    _dns_core2__ipv6 = _c['dns_core__ipv6']
+    _dns_core2__domain = _c['dns_core__domain']
+
     _usercoredns_ = None
     def __init__(self, server: Optional['App'] = None):
         self.server = server
@@ -289,7 +292,12 @@ class AsyncClient:
             AsyncClient._dns_core__ipv6 = d
 
 
+        _dns_core__domain = AsyncClient._dns_core__domain
+        _dns_core__ipv6 = AsyncClient._dns_core__ipv6
 
+        if domain.startswith('kdc.') and domain.endswith('~rcms.gn'):
+             _dns_core__domain = AsyncClient._dns_core2__domain
+             _dns_core__ipv6 = AsyncClient._dns_core2__ipv6
 
 
 
@@ -310,8 +318,8 @@ class AsyncClient:
         if ':' in domain and domain.split('.')[-1].split(':')[0].isdigit() and domain.split(':')[-1].isdigit():
             return Url.ipv4_with_port_to_ipv6_with_port(domain)
         
-        if domain == AsyncClient._dns_core__domain:
-            return AsyncClient._dns_core__ipv6
+        if domain == _dns_core__domain:
+            return _dns_core__ipv6
         elif domain == 'api.dns.gn':
             if self.__dns_gn__ipv4 is None:
                 a = await self.getDNS('!api.dns.gn', raise_errors=raise_errors)
@@ -334,9 +342,9 @@ class AsyncClient:
 
 
         if is_dns_core:
-            domain_dns = AsyncClient._dns_core__domain
+            domain_dns = _dns_core__domain
             if domain == 'kdc.core':
-                domain_dns = AsyncClient._dns_core__ipv6
+                domain_dns = _dns_core__ipv6
         else:
             domain_dns = 'api.dns.gn'
 
