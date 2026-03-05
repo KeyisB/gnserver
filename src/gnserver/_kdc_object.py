@@ -63,7 +63,6 @@ class KDCObject:
             self._x_keyId_key[self._second_kdc_domain_id] = self._gn_crt_data['kdc_key']
 
 
-
         self._requested_domains = requested_domains
         self._active_key_synchronization = active_key_synchronization
 

@@ -97,6 +97,13 @@ class AsyncClient:
                 }
             }
         }
+
+
+        self._dns_inflight: Dict[str, asyncio.Future] = {}
+
+        self._active_connections: dict[str, QuicClient] = {}
+        self._connect_locks: dict[str, asyncio.Lock] = {}
+        self._connect_tasks: dict[str, asyncio.Task[QuicClient]] = {}
         
 
     def init(self,
@@ -136,51 +143,138 @@ class AsyncClient:
         self.__response_callbacks[name] = callback
 
   
-    async def connect(self, request: GNRequest, restart_connection: bool = False, reconnect_wait: float = 10, keep_alive: bool = True) -> 'QuicClient':
+    def _get_connect_lock(self, domain: str) -> asyncio.Lock:
+        lock = self._connect_locks.get(domain)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._connect_locks[domain] = lock
+        return lock
+
+    def _connect_timeout(self, reconnect_wait: float) -> float:
+        return reconnect_wait or self._configuration.get('L5', {}).get('connection', {}).get('connect_timeout', 10)
+
+    async def connect(
+        self,
+        request: GNRequest,
+        restart_connection: bool = False,
+        reconnect_wait: float = 10,
+        keep_alive: bool = True
+    ) -> 'QuicClient':
         domain = request.url.hostname
-        if not restart_connection and domain in self._active_connections:
-            c = self._active_connections[domain]
-            if c.status == 'connecting':
-                try:
-                    await asyncio.wait_for(c.connect_future, reconnect_wait or self._configuration.get('L5', {}).get('connection', {}).get('connect_timeout', 10))
-                    if c.status == 'active':
-                        return c
-                    elif c.status == 'connecting':
-                        await self.disconnect(domain)
-                        raise AllGNFastCommands.transport.SendTimeout(f'Не удалось отправить запрос (таймаут соединения) с сервером {domain}')
-                    elif c.status == 'disconnect':
-                        raise AllGNFastCommands.transport.ConnectionError(f'Не удалось подключится к серверу {domain}')
-                except:
-                    await self.disconnect(domain)
-            else:
+        timeout = self._connect_timeout(reconnect_wait)
+
+        # fast path
+        if not restart_connection:
+            c = self._active_connections.get(domain)
+            if c is not None and c.status == 'active':
                 return c
 
-        c = QuicClient(self, domain)
-        self._active_connections[domain] = c
-        data = await self.getDNS(domain, raise_errors=True, host=domain if request.url.isIp else None)
+            t = self._connect_tasks.get(domain)
+            if t is not None:
+                return await asyncio.wait_for(asyncio.shield(t), timeout)
 
-        data = Url.ipv6_with_port_to_ipv6_and_port(data)
+        lock = self._get_connect_lock(domain)
 
+        async with lock:
+            # second check under lock
+            if not restart_connection:
+                c = self._active_connections.get(domain)
+                if c is not None and c.status == 'active':
+                    return c
 
+                t = self._connect_tasks.get(domain)
+                if t is not None:
+                    return await asyncio.wait_for(asyncio.shield(t), timeout)
 
-        def f(domain):
-            if domain in self._active_connections:
-                self._active_connections.pop(domain)
+            else:
+                # restart requested: fully drop current connection/task
+                old_task = self._connect_tasks.pop(domain, None)
+                if old_task is not None and not old_task.done():
+                    old_task.cancel()
 
-        c._disconnect_signal = f # type: ignore
+                old_conn = self._active_connections.get(domain)
+                if old_conn is not None:
+                    try:
+                        await old_conn.disconnect()
+                    except Exception:
+                        pass
+                    self._active_connections.pop(domain, None)
+
+            task = asyncio.create_task(
+                self._connect_impl(
+                    domain=domain,
+                    request=request,
+                    keep_alive=keep_alive,
+                )
+            )
+            self._connect_tasks[domain] = task
+
         try:
-            await asyncio.wait_for(c.connect(data[0], data[1], keep_alive=keep_alive), reconnect_wait or self._configuration.get('L5', {}).get('connection', {}).get('connect_timeout', 10))
-        except asyncio.exceptions.TimeoutError:
-            raise AllGNFastCommands.transport.QuicHandshakeTimeout(f'Не удалось подключится к серверу {domain} (таймаут рукопожатия)')
-        except asyncio.exceptions.CancelledError:
-            raise AllGNFastCommands.transport.ConnectionError(f'Не удалось подключится к серверу {domain}')
-        except:
-            raise AllGNFastCommands.transport.ConnectionError(f'Не удалось подключится к серверу {domain}')
+            return await asyncio.wait_for(asyncio.shield(task), timeout)
+        except asyncio.TimeoutError as e:
+            await self._cleanup_failed_connect(domain, task)
+            raise AllGNFastCommands.transport.QuicHandshakeTimeout(
+                f'Не удалось подключится к серверу {domain} (таймаут рукопожатия)'
+            ) from e
+        except asyncio.CancelledError as e:
+            await self._cleanup_failed_connect(domain, task)
+            raise AllGNFastCommands.transport.ConnectionError(
+                f'Не удалось подключится к серверу {domain}'
+            ) from e
+        except GNResponse:
+            raise
+        except Exception as e:
+            await self._cleanup_failed_connect(domain, task)
+            raise AllGNFastCommands.transport.ConnectionError(
+                f'Не удалось подключится к серверу {domain}'
+            ) from e
 
+    async def _connect_impl(
+        self,
+        domain: str,
+        request: GNRequest,
+        keep_alive: bool
+    ) -> 'QuicClient':
+        c = QuicClient(self, domain)
 
-        await c.connect_future
+        def on_disconnect(domain_: str):
+            current = self._active_connections.get(domain_)
+            if current is c:
+                self._active_connections.pop(domain_, None)
 
+        c._disconnect_signal = on_disconnect  # type: ignore
+
+        # ВАЖНО: DNS до публикации active connection, но task уже общая
+        data = await self.getDNS(
+            domain,
+            raise_errors=True,
+            host=domain if request.url.isIp else None
+        )
+        ip, port = Url.ipv6_with_port_to_ipv6_and_port(data)
+
+        await c.connect(ip, port, keep_alive=keep_alive)
+
+        if c.status != 'active':
+            raise AllGNFastCommands.transport.ConnectionError(
+                f'Не удалось подключится к серверу {domain}'
+            )
+
+        self._active_connections[domain] = c
         return c
+
+    async def _cleanup_failed_connect(self, domain: str, task: asyncio.Task) -> None:
+        current_task = self._connect_tasks.get(domain)
+        if current_task is task:
+            self._connect_tasks.pop(domain, None)
+
+        c = self._active_connections.get(domain)
+        if c is not None and c.status != 'active':
+            try:
+                await c.disconnect()
+            except Exception:
+                pass
+            if self._active_connections.get(domain) is c:
+                self._active_connections.pop(domain, None)
 
     async def disconnect(self, domain):
         if domain not in self._active_connections:
@@ -282,11 +376,30 @@ class AsyncClient:
 
     async def getDNS(self, domain: str, use_cache: bool = True, keep_alive: bool = False, raise_errors: bool = False, host: Optional[str] = None) -> Union[str, GNResponse]:
 
+        if domain in self._dns_inflight:
+            return await self._dns_inflight[domain]
+
+        fut = asyncio.get_running_loop().create_future()
+        self._dns_inflight[domain] = fut
+
+        try:
+            r = await self._getDNS(domain, use_cache=use_cache, keep_alive=keep_alive, raise_errors=raise_errors, host=host)
+            fut.set_result(r)
+            return r
+        except Exception as e:
+            fut.set_exception(e)
+            raise
+        finally:
+            self._dns_inflight.pop(domain, None)
+
+
+    async def _getDNS(self, domain: str, use_cache: bool = True, keep_alive: bool = False, raise_errors: bool = False, host: Optional[str] = None) -> Union[str, GNResponse]:
+
         if AsyncClient._usercoredns_ is not None:
             p = AsyncClient._usercoredns_
             AsyncClient._usercoredns_ = None
             self._kdc.setDomainEcryptionType(AsyncClient._dns_core__domain, 0)
-            d: str = await self.getDNS(p, use_cache=False, keep_alive=False, raise_errors=True) # type: ignore
+            d: str = await self._getDNS(p, use_cache=False, keep_alive=False, raise_errors=True) # type: ignore
 
             AsyncClient._dns_core__domain = p
             AsyncClient._dns_core__ipv6 = d
@@ -322,7 +435,7 @@ class AsyncClient:
             return _dns_core__ipv6
         elif domain == 'api.dns.gn':
             if self.__dns_gn__ipv4 is None:
-                a = await self.getDNS('!api.dns.gn', raise_errors=raise_errors)
+                a = await self._getDNS('!api.dns.gn', raise_errors=raise_errors)
                 if not isinstance(a, str):
                     return a
                 else:
@@ -334,7 +447,7 @@ class AsyncClient:
         is_dns_core = GNDomain.isSys(domain) or GNDomain.isCore(domain)
         if not is_dns_core:
             if self.__dns_gn__ipv4 is None:
-                a = await self.getDNS('api.dns.gn', raise_errors=raise_errors)
+                a = await self._getDNS('api.dns.gn', raise_errors=raise_errors)
                 if not isinstance(a, str):
                     return a
                 else:
@@ -504,8 +617,11 @@ class RawQuicClient(QuicProtocolShell):
         
         print(f'Waiting for response on stream {sid}...')
         try:
-            data = await fut
+            data = await asyncio.wait_for(fut, 30)
             print(f'Response received on stream {sid}, length: {len(data) if data else "None"} bytes')
+        except asyncio.exceptions.TimeoutError:
+            print(f'Timeout waiting for response on stream {sid}')
+            return AllGNFastCommands.transport.ReceiveTimeout()
         except Exception as e:
             print(traceback.format_exc())
             return AllGNFastCommands.transport.ConnectionError()
@@ -569,10 +685,11 @@ class QuicClient:
         cfg.idle_timeout = self._client._configuration.get('L5', {}).get('disconnection', {}).get('idle_timeout', 60)
 
         encType = int(not self.domain == Url.ip_and_port_to_ipv6_with_port(ip, port))
-        if self._client._kdc.getDomainEcryptionType(self.domain) is None:
+        current_enc = self._client._kdc.getDomainEcryptionType(self.domain)
+        if current_enc is None:
             self._client._kdc.setDomainEcryptionType(self.domain, encType)
         else:
-            encType = self._client._kdc.getDomainEcryptionType(self.domain)
+            encType = current_enc
 
         if encType != 0:
             await self._client._kdc.requestKeyIfNotExist(self.domain)
@@ -585,24 +702,25 @@ class QuicClient:
             configuration=cfg,
             create_protocol=RawQuicClient,
             wait_connected=True,
-            encType=encType  # type: ignore
+            encType=encType,  # type: ignore
         )
 
         try:
-            self._quik_core = await self._client_cm.__aenter__() # type: ignore
+            self._quik_core = await self._client_cm.__aenter__()  # type: ignore
             self._quik_core.quicClient = self
 
             if keep_alive:
                 asyncio.create_task(self._quik_core._keepalive_loop())
 
             self.status = 'active'
-            if not self.connect_future.done():
-                self.connect_future.set_result(True)
-        except Exception as e:
-            print(f'Error connecting: {e}')
-            if not self.connect_future.done():
-                self.connect_future.set_exception(AllGNFastCommands.transport.ConnectionError('Не удалось подключится к серверу'))
-            await self._client_cm.__aexit__(None, None, None)
+        except Exception:
+            self.status = 'disconnect'
+            try:
+                if self._client_cm is not None:
+                    await self._client_cm.__aexit__(None, None, None)
+            finally:
+                self._client_cm = None
+            raise
 
     async def disconnect(self):
         self.status = 'disconnect'
@@ -622,7 +740,8 @@ class QuicClient:
                 if isinstance(fut, asyncio.Queue):
                     del fut
                 else:
-                    fut.set_exception(Exception)
+                    if not fut.done():
+                        fut.set_exception(Exception())
 
 
 
