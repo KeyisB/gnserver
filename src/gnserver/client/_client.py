@@ -281,8 +281,8 @@ class AsyncClient:
 
         if AsyncClient._usercoredns_ is not None:
             p = AsyncClient._usercoredns_
-            d: str = await self.getDNS(p, use_cache=False, keep_alive=False, raise_errors=True) # type: ignore
             AsyncClient._usercoredns_ = None
+            d: str = await self.getDNS(p, use_cache=False, keep_alive=False, raise_errors=True) # type: ignore
 
             AsyncClient._dns_core__domain = p
             AsyncClient._dns_core__ipv6 = d
