@@ -97,6 +97,8 @@ class AsyncClient:
                 }
             }
         }
+
+        self._dns_inflight: Dict[str, asyncio.Future] = {}
         
 
     def init(self,
