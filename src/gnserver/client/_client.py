@@ -139,6 +139,7 @@ class AsyncClient:
 
   
     async def connect(self, request: GNRequest, restart_connection: bool = False, reconnect_wait: float = 10, keep_alive: bool = True) -> 'QuicClient':
+        print(f'Connecting to {request.url.hostname} (restart_connection={restart_connection}, reconnect_wait={reconnect_wait}, keep_alive={keep_alive})')
         domain = request.url.hostname
         if not restart_connection and domain in self._active_connections:
             c = self._active_connections[domain]
@@ -364,7 +365,7 @@ class AsyncClient:
 
         if is_dns_core:
             domain_dns = _dns_core__domain
-            if domain == 'kdc.core':
+            if domain in (self._kdc._kdc_domain, self._kdc._second_kdc_domain):
                 domain_dns = _dns_core__ipv6
         else:
             domain_dns = 'api.dns.gn'
