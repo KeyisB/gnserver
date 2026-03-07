@@ -58,6 +58,7 @@ class ConnectionEncryptor:
         self.encryption_type: int = 0
         self.keyid: Optional[int] = 0
         self.domain: Optional[str] = None
+        self.processing_lock = asyncio.Lock()
 
         
 
@@ -266,10 +267,12 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
 
         self._inbound_workers = max(1, int(getattr(self.DEPConfig, 'incoming_datagram_workers', 1)))
         self._inbound_queue_size = max(1, int(getattr(self.DEPConfig, 'incoming_datagram_queue_size', 8192)))
+        self._inbound_global_lock_enabled = bool(getattr(self.DEPConfig, 'incoming_datagram_global_lock', False))
         self._inbound_queues: List[Queue] = [Queue(maxsize=self._inbound_queue_size) for _ in range(self._inbound_workers)]
         self._inbound_tasks: List[asyncio.Task] = []
         self._inbound_started = False
         self._inbound_drop_count = 0
+        self._inbound_global_lock = asyncio.Lock()
 
         self.active_key_synchronization_callback_domain_filter = None
         if dEPConfig is not None:
@@ -299,7 +302,16 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
                 break
 
             try:
-                await self._handle_datagram(data, addr)
+                maddr = self.from_addr_to_maddr(addr)
+                connectionEnc = self.getDgEnc(maddr)
+
+                if self._inbound_global_lock_enabled:
+                    async with self._inbound_global_lock:
+                        await self._handle_datagram(data, addr)
+                else:
+                    # Prevent concurrent processing for the same peer even with multiple workers.
+                    async with connectionEnc.processing_lock:
+                        await self._handle_datagram(data, addr)
             except asyncio.CancelledError:
                 raise
             except Exception as e:

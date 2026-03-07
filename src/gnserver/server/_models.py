@@ -14,6 +14,7 @@ class DEPConfig:
                  kdc_active_key_synchronization_callback_domain_filter: Optional[List[str]] = None,
                  incoming_datagram_workers: int = 1,
                  incoming_datagram_queue_size: int = 8192,
+                 incoming_datagram_global_lock: bool = False,
                  ) -> None:
         """
         # Datagram Encryption Protocol Config
@@ -32,6 +33,7 @@ class DEPConfig:
 
         :incoming_datagram_workers: количество фиксированных workers для входящих UDP датаграмм
         :incoming_datagram_queue_size: max размер очереди на worker для входящих UDP датаграмм
+        :incoming_datagram_global_lock: если True, все входящие датаграммы обрабатываются строго последовательно через глобальный lock
 
         """
         self.kdc_active_key_synchronization_domain_filter = kdc_active_key_synchronization_domain_filter
@@ -44,6 +46,7 @@ class DEPConfig:
         self.kdc_active_key_synchronization_callback_domain_filter = kdc_active_key_synchronization_callback_domain_filter
         self.incoming_datagram_workers = max(1, int(incoming_datagram_workers or 1))
         self.incoming_datagram_queue_size = max(1, int(incoming_datagram_queue_size or 1))
+        self.incoming_datagram_global_lock = bool(incoming_datagram_global_lock)
   
 
 
