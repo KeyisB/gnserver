@@ -317,9 +317,9 @@ class AsyncClient:
         _dns_core__domain = AsyncClient._dns_core__domain
         _dns_core__ipv6 = AsyncClient._dns_core__ipv6
 
-        if domain.startswith('kdc.') and domain.endswith('~rcms.gn'):
-             _dns_core__domain = AsyncClient._dns_core2__domain
-             _dns_core__ipv6 = AsyncClient._dns_core2__ipv6
+        if domain in (self._kdc._kdc_domain, self._kdc._second_kdc_domain):
+            _dns_core__domain = AsyncClient._dns_core2__domain
+            _dns_core__ipv6 = AsyncClient._dns_core2__ipv6
 
 
 
