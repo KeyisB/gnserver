@@ -22,7 +22,7 @@ from aioquic.quic.events import (
 P = ParamSpec("P")
 R = TypeVar("R")
 
-from gnobjects.net.objects import GNRequest, GNResponse, FileObject, CORSObject, TempDataGroup, TempDataObject
+from gnobjects.net.objects import GNRequest, GNResponse, FileObject, CORSObject, TempDataGroup, TempDataObject, Url
 from gnobjects.net.fastcommands import AllGNFastCommands, GNFastCommand, AllGNFastCommands as responses
 from gnobjects.net.objects import pack_payload, unpack_payload
 
@@ -333,11 +333,11 @@ class App:
             self._buffer: Dict[int, bytearray] = {}
             self._streams: Dict[int, Tuple[asyncio.Queue[Optional[GNRequest]], bool]] = {}
 
-            self._domain: str = cast(str, self.datagramEndpoint.getDomain(self))
+            self._domain: Optional[str] = cast(Optional[str], self.datagramEndpoint.getDomain(self))
             self._disconnected = False
             self._init_domain = False
 
-            self._api.connections[self._domain] = self
+            self._refresh_domain()
 
             asyncio.create_task(self._api.dispatchEvent('connect', proto=self, domain=self._domain))
             
@@ -370,20 +370,42 @@ class App:
             
             asyncio.create_task(self._api.dispatchEvent('disconnect', domain=self._domain, L5_reason=reason))
 
+        def _refresh_domain(self) -> Optional[str]:
+            if self._domain is None:
+                self._domain = cast(Optional[str], self.datagramEndpoint.getDomain(self))
+
+            if self._domain is None:
+                network_paths = getattr(self._quic, "_network_paths", None)
+                if network_paths:
+                    addr = network_paths[0].addr
+                    maddr = DatagramEndpoint.from_addr_to_maddr(addr)
+                    self._domain = Url.ip_and_port_to_ipv6_with_port(maddr[0], maddr[1])
+                    logger.warning(f"[DOMAIN] Missing CID mapping, fallback domain used: {self._domain}")
+
+            if self._domain is not None and self._api.connections.get(self._domain) is not self:
+                self._api.connections[self._domain] = self
+
+            return self._domain
+
         async def _resolve_raw_request(self, stream_id: int, data: bytes):
     
             request = GNRequest.deserialize(data)
+
+            self._refresh_domain()
                 
             await self._resolve_dev_transport_request(request)
 
             
             if self._domain is None:
-                asyncio.create_task(self.sendRawResponse(stream_id, GNResponse('error', {'error': f'domain not set {self._quic._network_paths[0].addr}'})))
+                network_paths = getattr(self._quic, "_network_paths", None)
+                remote_addr = network_paths[0].addr if network_paths else 'unknown'
+                asyncio.create_task(self.sendRawResponse(stream_id, GNResponse('error', {'error': f'domain not set {remote_addr}'})))
                 return
             
             request.client._data['domain'] = self._domain
             
-            request.client._data['remote_addr'] = self._quic._network_paths[0].addr
+            network_paths = getattr(self._quic, "_network_paths", None)
+            request.client._data['remote_addr'] = network_paths[0].addr if network_paths else None
             request.stream_id = stream_id   # type: ignore
 
             request._assembly_server()

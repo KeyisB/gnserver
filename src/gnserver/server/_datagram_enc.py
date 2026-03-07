@@ -57,6 +57,7 @@ class ConnectionEncryptor:
 
         self.encryption_type: int = 0
         self.keyid: Optional[int] = 0
+        self.domain: Optional[str] = None
 
         
 
@@ -66,7 +67,7 @@ class ConnectionEncryptor:
 
         key = self.eEndpoint._kdc.getKey(keyid)
         
-        DestDomain = self.eEndpoint._kdc.getDomainById(keyid)
+        DestDomain = self.eEndpoint._kdc.getDomainById(cast(Any, keyid))
 
         if DestDomain is None:
             print('ERROR: 143.822')
@@ -80,6 +81,7 @@ class ConnectionEncryptor:
         self._key_out = HKDF(algorithm=hashes.SHA3_512(), length=32, salt=self_domain.encode() + DestDomain.encode(), info=b'gn:DgEncryptor').derive(key)
 
         self.ready = True
+        self.domain = DestDomain
         return DestDomain
 
     async def initRaw(self):
@@ -110,6 +112,7 @@ class ConnectionEncryptor:
         self._key_out = HKDF(algorithm=hashes.SHA3_512(), length=32, salt=self_domain.encode() + domain.encode(), info=b'gn:DgEncryptor').derive(key)
 
         self.ready = True
+        self.domain = domain
         return self.keyid
 
 
@@ -433,50 +436,58 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
         if data[0] & 0x01: # если системный пакет.
             commnd_id = (data[1] >> 4) & 0x0F
             datagram = data[10:]
-            if commnd_id == 0 and not connectionEnc.ready: # initial
-                
-
+            if commnd_id == 0: # initial
                 if len(addr) == 2:
                     self.transport.addV4maddr(maddr)
 
                 encryption_type = data[1] & 0x0F
-                if encryption_type != 0: # encrypted
-                    
-                        
-                    keyType = data[2]
-                    key_id = int.from_bytes(data[3:10], 'big')
+                if not connectionEnc.ready:
+                    if encryption_type != 0: # encrypted
+                        keyType = data[2]
+                        key_id = int.from_bytes(data[3:10], 'big')
 
-                    
-                    if not self._kdc._active_key_synchronization:
-                        key = self._kdc.getKey((keyType, key_id))
-                        if key is None:
-                            connectionEnc.ready = None # block
-                            raise Exception('Соединение отклонено из за политики kdc_active_key_synchronization')
+                        if not self._kdc._active_key_synchronization:
+                            key = self._kdc.getKey((keyType, key_id))
+                            if key is None:
+                                connectionEnc.ready = None # block
+                                raise Exception('Соединение отклонено из за политики kdc_active_key_synchronization')
 
-                    d = await connectionEnc.initByKeyid(encryption_type, (keyType, key_id))
-                    if self.active_key_synchronization_callback_domain_filter is not None and not self.active_key_synchronization_callback_domain_filter.match_any(d) and not GNDomain.isCore(d):
-                        connectionEnc.ready = None
-                        raise Exception(f'Соединение {d} отклонено из за политики active_key_synchronization_callback_domain_filter: {self.DEPConfig.kdc_active_key_synchronization_domain_filter}')
-
-                else:
-                    if maddr[0] in ('::1', '127.0.0.1', '::ffff:127.0.0.1'):
-                        if not self.DEPConfig.allow_local_unencrypted_connections:
+                        d = await connectionEnc.initByKeyid(encryption_type, (keyType, key_id))
+                        if self.active_key_synchronization_callback_domain_filter is not None and not self.active_key_synchronization_callback_domain_filter.match_any(d) and not GNDomain.isCore(d):
                             connectionEnc.ready = None
-                            raise Exception('Соединение отклонено из за политики DEPConfig.allow_local_unencrypted_connections')
+                            raise Exception(f'Соединение {d} отклонено из за политики active_key_synchronization_callback_domain_filter: {self.DEPConfig.kdc_active_key_synchronization_domain_filter}')
+
                     else:
-                        if not self.DEPConfig.allow_unencrypted_connections:
-                            connectionEnc.ready = None
-                            raise Exception('Соединение отклонено из за политики DEPConfig.allow_unencrypted_connections')
-                        
+                        if maddr[0] in ('::1', '127.0.0.1', '::ffff:127.0.0.1'):
+                            if not self.DEPConfig.allow_local_unencrypted_connections:
+                                connectionEnc.ready = None
+                                raise Exception('Соединение отклонено из за политики DEPConfig.allow_local_unencrypted_connections')
+                        else:
+                            if not self.DEPConfig.allow_unencrypted_connections:
+                                connectionEnc.ready = None
+                                raise Exception('Соединение отклонено из за политики DEPConfig.allow_unencrypted_connections')
 
+                        await connectionEnc.initRaw()
+                        d = Url.ip_and_port_to_ipv6_with_port(maddr[0], maddr[1])
+                        connectionEnc.domain = d
 
+                    while not connectionEnc.not_ready_queue.empty():
+                        raw, a = connectionEnc.not_ready_queue.get_nowait()
+                        await self._handle_datagram(raw, a)
+                else:
+                    # Existing UDP association can still open new QUIC connections with new destination CID.
+                    # Recompute domain on every initial packet so CID -> domain stays fresh.
+                    if encryption_type != 0:
+                        keyType = data[2]
+                        key_id = int.from_bytes(data[3:10], 'big')
+                        d = self._kdc.getDomainById(cast(Any, (keyType, key_id)))
+                        if d is None:
+                            d = connectionEnc.domain
+                    else:
+                        d = Url.ip_and_port_to_ipv6_with_port(maddr[0], maddr[1])
 
-                    await connectionEnc.initRaw()
-                    d = Url.ip_and_port_to_ipv6_with_port(maddr[0], maddr[1])
-
-                while not connectionEnc.not_ready_queue.empty():
-                    raw, a = connectionEnc.not_ready_queue.get_nowait()
-                    await self._handle_datagram(raw, a)
+                    if d is not None:
+                        connectionEnc.domain = d
         else:
             datagram = data[1:]
 
