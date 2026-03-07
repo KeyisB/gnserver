@@ -103,7 +103,7 @@ class AsyncClient:
 
     def init(self,
              gn_crt: Union[bytes, str, Path],
-             requested_domains: List[str] = [],
+             requested_domains: Optional[List[str]] = None,
              active_key_synchronization: bool = True,
              active_key_synchronization_callback: Optional[Callable[[List[Union[str, int]]], Union[List[Tuple[int, str, bytes]], Coroutine]]] = None,
              active_key_synchronization_callback_domainFilter: Optional[List[str]] = None
@@ -118,7 +118,7 @@ class AsyncClient:
 
         self._kdc.init(
             self._gn_crt_data,
-            requested_domains,
+            list(requested_domains or []),
             active_key_synchronization,
             active_key_synchronization_callback,
             active_key_synchronization_callback_domainFilter
@@ -139,24 +139,36 @@ class AsyncClient:
 
   
     async def connect(self, request: GNRequest, restart_connection: bool = False, reconnect_wait: float = 10, keep_alive: bool = True) -> 'QuicClient':
-        print(f'Connecting to {request.url.hostname} (restart_connection={restart_connection}, reconnect_wait={reconnect_wait}, keep_alive={keep_alive})')
         domain = request.url.hostname
+
+        if restart_connection and domain in self._active_connections:
+            await self.disconnect(domain)
+
         if not restart_connection and domain in self._active_connections:
             c = self._active_connections[domain]
+
+            if c.status == 'active' and c._quik_core is not None:
+                logger.debug(f'Reusing active connection to {domain}')
+                return c
+
             if c.status == 'connecting':
                 try:
                     await asyncio.wait_for(c.connect_future, reconnect_wait or self._configuration.get('L5', {}).get('connection', {}).get('connect_timeout', 10))
-                    if c.status == 'active':
+                    if c.status == 'active' and c._quik_core is not None:
+                        logger.debug(f'Reusing active connection to {domain} (post-wait)')
                         return c
                     elif c.status == 'connecting':
                         await self.disconnect(domain)
                         raise AllGNFastCommands.transport.SendTimeout(f'Не удалось отправить запрос (таймаут соединения) с сервером {domain}')
                     elif c.status == 'disconnect':
                         raise AllGNFastCommands.transport.ConnectionError(f'Не удалось подключится к серверу {domain}')
-                except:
+                except Exception:
                     await self.disconnect(domain)
             else:
-                return c
+                # stale client instance can remain briefly in map during races
+                self._active_connections.pop(domain, None)
+
+        print(f'Connecting to {domain} (restart_connection={restart_connection}, reconnect_wait={reconnect_wait}, keep_alive={keep_alive})')
 
         c = QuicClient(self, domain)
         self._active_connections[domain] = c
@@ -406,6 +418,7 @@ class RawQuicClient(QuicProtocolShell):
         self._inflight: Dict[int, Union[asyncio.Future, asyncio.Queue[Optional[GNResponse]]]] = {}
         self._inflight_streams: Dict[int, bytearray] = {}
         self._buffer: Dict[Union[int, str], bytearray] = {}
+        self._timed_out_streams: set[int] = set()
 
         self._last_activity = time.time()
         self._running = True
@@ -430,6 +443,11 @@ class RawQuicClient(QuicProtocolShell):
 
     def quic_event_received(self, event: QuicEvent) -> None:
         if isinstance(event, StreamDataReceived):
+            if event.stream_id in self._timed_out_streams:
+                if event.end_stream:
+                    self._timed_out_streams.discard(event.stream_id)
+                return
+
             handler = self._inflight.get(event.stream_id)
             if handler is None:
                 if self._client._client.server is None:
@@ -529,9 +547,17 @@ class RawQuicClient(QuicProtocolShell):
             data = await asyncio.wait_for(fut, 30)
             print(f'Response received on stream {sid}, length: {len(data) if data else "None"} bytes')
         except asyncio.exceptions.TimeoutError:
+            self._inflight.pop(sid, None)
+            self._timed_out_streams.add(sid)
+            if len(self._timed_out_streams) > 8192:
+                self._timed_out_streams.clear()
             print(f'Timeout waiting for response on stream {sid}')
             return AllGNFastCommands.transport.ReceiveTimeout()
-        except Exception as e:
+        except Exception:
+            self._inflight.pop(sid, None)
+            self._timed_out_streams.add(sid)
+            if len(self._timed_out_streams) > 8192:
+                self._timed_out_streams.clear()
             print(traceback.format_exc())
             return AllGNFastCommands.transport.ConnectionError()
         print(f'Raw response data: {data[:100] if data else "None"}{"..." if data and len(data) > 100 else ""}')

@@ -6,12 +6,14 @@ class DEPConfig:
     def __init__(self,
                  kdc_active_key_synchronization_domain_filter: Optional[List[str]] = None,
                  allow_kdc_active_key_synchronization: bool = True,
-                 start_kdc_requested_domains: List[str] = [],
+                 start_kdc_requested_domains: Optional[List[str]] = None,
                  allow_unencrypted_connections: bool = False,
                  allow_local_unencrypted_connections: bool = True,
                  start_kdc_passive_keys: Optional[List[Tuple[Tuple[int, int], str, bytes]]] = None,
                  kdc_active_key_synchronization_callback: Optional[Callable[[List[Union[str, int]]], Union[List[Tuple[int, str, bytes]], Coroutine]]] = None,
-                 kdc_active_key_synchronization_callback_domain_filter: Optional[List[str]] = None
+                 kdc_active_key_synchronization_callback_domain_filter: Optional[List[str]] = None,
+                 incoming_datagram_workers: int = 1,
+                 incoming_datagram_queue_size: int = 8192,
                  ) -> None:
         """
         # Datagram Encryption Protocol Config
@@ -28,15 +30,20 @@ class DEPConfig:
         :kdc_active_key_synchronization_callback: callback для установки ключей самостоятельно
         :kdc_active_key_synchronization_callback_domainFilter: фильтр допуска к callback-у. Поддерживает *, **,  int - для всех keyId
 
+        :incoming_datagram_workers: количество фиксированных workers для входящих UDP датаграмм
+        :incoming_datagram_queue_size: max размер очереди на worker для входящих UDP датаграмм
+
         """
         self.kdc_active_key_synchronization_domain_filter = kdc_active_key_synchronization_domain_filter
         self.allow_kdc_active_key_synchronization = allow_kdc_active_key_synchronization
-        self.start_kdc_requested_domains = start_kdc_requested_domains
+        self.start_kdc_requested_domains = list(start_kdc_requested_domains or [])
         self.allow_unencrypted_connections = allow_unencrypted_connections
         self.allow_local_unencrypted_connections = allow_local_unencrypted_connections
         self.start_kdc_passive_keys = start_kdc_passive_keys
         self.kdc_active_key_synchronization_callback = kdc_active_key_synchronization_callback
         self.kdc_active_key_synchronization_callback_domain_filter = kdc_active_key_synchronization_callback_domain_filter
+        self.incoming_datagram_workers = max(1, int(incoming_datagram_workers or 1))
+        self.incoming_datagram_queue_size = max(1, int(incoming_datagram_queue_size or 1))
   
 
 

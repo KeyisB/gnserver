@@ -24,7 +24,7 @@ class KDCObject:
 
     def init(self,
              gn_crt: Optional[Union[bytes, str, Path, dict]] = None,
-             requested_domains: List[str] = [],
+             requested_domains: Optional[List[str]] = None,
              active_key_synchronization: bool = True,
              active_key_synchronization_callback: Optional[Callable[[List[Union[str, int]]], Union[List[Tuple[int, str, bytes]], Coroutine]]] = None,
              active_key_synchronization_callback_domainFilter: Optional[List[str]] = None
@@ -64,7 +64,7 @@ class KDCObject:
 
 
 
-        self._requested_domains = requested_domains
+        self._requested_domains = list(requested_domains or [])
         self._active_key_synchronization = active_key_synchronization
 
         
@@ -115,13 +115,13 @@ class KDCObject:
             c = []
             r = []
             for d_or_id in domain_or_keyId:
-                if not isinstance(domain_or_keyId, str):
+                if not isinstance(d_or_id, str):
                     if 'int' not in self._active_key_synchronization_df.literal:
                         r.append(d_or_id)
                     else:
                         c.append(d_or_id)
                 else:
-                    if not self._active_key_synchronization_df.match_any(domain_or_keyId):
+                    if not self._active_key_synchronization_df.match_any(d_or_id):
                         r.append(d_or_id)
                     else:
                         c.append(d_or_id)

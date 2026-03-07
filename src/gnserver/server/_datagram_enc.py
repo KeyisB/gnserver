@@ -264,6 +264,13 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
 
         self.DEPConfig: DEPConfig = dEPConfig
 
+        self._inbound_workers = max(1, int(getattr(self.DEPConfig, 'incoming_datagram_workers', 1)))
+        self._inbound_queue_size = max(1, int(getattr(self.DEPConfig, 'incoming_datagram_queue_size', 8192)))
+        self._inbound_queues: List[Queue] = [Queue(maxsize=self._inbound_queue_size) for _ in range(self._inbound_workers)]
+        self._inbound_tasks: List[asyncio.Task] = []
+        self._inbound_started = False
+        self._inbound_drop_count = 0
+
         self.active_key_synchronization_callback_domain_filter = None
         if dEPConfig is not None:
             a = dEPConfig.kdc_active_key_synchronization_domain_filter
@@ -280,9 +287,60 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
         if d is None:
             return
         return d
+
+    def dropProtocolState(self, proto: QuicProtocolShell):
+        self.x_cid_domain.pop(proto._quic.original_destination_connection_id, None)
+
+    async def _inbound_worker(self, worker_id: int, queue: Queue):
+        while True:
+            try:
+                data, addr = await queue.get()
+            except asyncio.CancelledError:
+                break
+
+            try:
+                await self._handle_datagram(data, addr)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                print(f'UDP worker[{worker_id}] error: {e}')
+            finally:
+                queue.task_done()
+
+    def _start_inbound_workers(self):
+        if self._inbound_started:
+            return
+
+        self._inbound_started = True
+        self._inbound_tasks = []
+        for worker_id, queue in enumerate(self._inbound_queues):
+            task = self.loop.create_task(self._inbound_worker(worker_id, queue))
+            self._inbound_tasks.append(task)
+
+    def _stop_inbound_workers(self):
+        for task in self._inbound_tasks:
+            task.cancel()
+        self._inbound_tasks.clear()
+        self._inbound_started = False
+
+        # purge queued datagrams on shutdown to release memory immediately
+        for queue in self._inbound_queues:
+            while True:
+                try:
+                    queue.get_nowait()
+                    queue.task_done()
+                except asyncio.QueueEmpty:
+                    break
+
+    def _inbound_shard(self, addr) -> int:
+        if self._inbound_workers == 1:
+            return 0
+        maddr = self.from_addr_to_maddr(addr)
+        return hash(maddr) % self._inbound_workers
     
     
     def connection_lost(self, exc):
+        self._stop_inbound_workers()
         self._quic_routing.connection_lost(exc)
 
     def error_received(self, exc):
@@ -303,6 +361,7 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
         self._quic_routing.connection_made(proxy)
 
         self.transport = proxy
+        self._start_inbound_workers()
 
     def getDgEnc(self, addr: Any) -> ConnectionEncryptor:
         r = self.x_maddr_dgEnc.get(addr)
@@ -318,7 +377,19 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
     
 
     def datagram_received(self, data, addr):
-        self.loop.create_task(self._handle_datagram(data, addr))
+        if not self._inbound_started:
+            self._start_inbound_workers()
+
+        queue = self._inbound_queues[self._inbound_shard(addr)]
+        try:
+            queue.put_nowait((data, addr))
+        except asyncio.QueueFull:
+            self._inbound_drop_count += 1
+            if self._inbound_drop_count == 1 or self._inbound_drop_count % 1024 == 0:
+                print(
+                    f'UDP inbound queue overflow: dropped={self._inbound_drop_count}, '
+                    f'workers={self._inbound_workers}, queue_maxsize={self._inbound_queue_size}'
+                )
 
     @staticmethod
     def from_addr_to_maddr(addr) -> Tuple[str, int, int]:

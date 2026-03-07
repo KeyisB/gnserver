@@ -367,6 +367,17 @@ class App:
 
             logger.info(f"[DISCONNECT]  — {reason}")
 
+            # release per-connection memory on disconnect
+            self._buffer.clear()
+
+            if self._domain is not None and self._api.connections.get(self._domain) is self:
+                self._api.connections.pop(self._domain, None)
+
+            try:
+                self.datagramEndpoint.dropProtocolState(self)
+            except Exception:
+                logger.debug('Failed to drop datagram protocol state for disconnected connection')
+
             
             asyncio.create_task(self._api.dispatchEvent('disconnect', domain=self._domain, L5_reason=reason))
 
@@ -388,30 +399,35 @@ class App:
             return self._domain
 
         async def _resolve_raw_request(self, stream_id: int, data: bytes):
-    
-            request = GNRequest.deserialize(data)
+            try:
+                request = GNRequest.deserialize(data)
 
-            self._refresh_domain()
-                
-            await self._resolve_dev_transport_request(request)
+                self._refresh_domain()
 
-            
-            if self._domain is None:
+                await self._resolve_dev_transport_request(request)
+
+                if self._domain is None:
+                    network_paths = getattr(self._quic, "_network_paths", None)
+                    remote_addr = network_paths[0].addr if network_paths else 'unknown'
+                    asyncio.create_task(self.sendRawResponse(stream_id, GNResponse('error', {'error': f'domain not set {remote_addr}'})))
+                    return
+
+                request.client._data['domain'] = self._domain
+
                 network_paths = getattr(self._quic, "_network_paths", None)
-                remote_addr = network_paths[0].addr if network_paths else 'unknown'
-                asyncio.create_task(self.sendRawResponse(stream_id, GNResponse('error', {'error': f'domain not set {remote_addr}'})))
-                return
-            
-            request.client._data['domain'] = self._domain
-            
-            network_paths = getattr(self._quic, "_network_paths", None)
-            request.client._data['remote_addr'] = network_paths[0].addr if network_paths else None
-            request.stream_id = stream_id   # type: ignore
+                request.client._data['remote_addr'] = network_paths[0].addr if network_paths else None
+                request.stream_id = stream_id   # type: ignore
 
-            request._assembly_server()
-
-            self._buffer.pop(stream_id, None)
-            await self._handle_request(request)
+                request._assembly_server()
+                await self._handle_request(request)
+            except Exception:
+                logger.error('Raw request resolve error:\n' + traceback.format_exc())
+                try:
+                    await self.sendRawResponse(stream_id, AllGNFastCommands.InternalServerError())
+                except Exception:
+                    logger.error('Raw request error response failed:\n' + traceback.format_exc())
+            finally:
+                self._buffer.pop(stream_id, None)
 
         async def _resolve_dev_transport_request(self, request: GNRequest):
             if not request.transportObject.routeProtocol.dev:
