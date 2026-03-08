@@ -1,5 +1,6 @@
 from typing import List, Optional, Dict, Union, Set, TYPE_CHECKING, Callable, Coroutine
 from gnobjects.net.objects import Url, GNRequest
+from gnobjects.net.fastcommands import AllGNFastCommands
 import inspect
 from typing import List, Optional, Dict, Union, Set, Deque, Tuple, cast
 from pathlib import Path
@@ -132,7 +133,7 @@ class KDCObject:
                 else:
                     a = self.active_key_synchronization_callback(c)
                 if not isinstance(a, list):
-                    raise Exception('active_key_synchronization_callback must return list')
+                    raise AllGNFastCommands.kdc.InvalidResponseFormat('active_key_synchronization_callback must return list')
                 out.extend(a) # type: ignore
             if r:
                 res = await self._requestKDC(r)
@@ -174,7 +175,7 @@ class KDCObject:
         
         if not isinstance(rs.payload, list):
             print(f'command.value -> {rs.command.value}. ok: {bool(rs.command.ok)}, app: {bool(rs.command.app)}, cors: {bool(rs.command.cors)}, dns: {bool(rs.command.dns)}, dns.DomainBlocked: {bool(rs.command.dns.DomainBlocked)}, Forbidden: {bool(rs.command.Forbidden)}, app.Forbidden: {bool(rs.command.app.Forbidden)}')
-            raise Exception(f'r.payload is not list. {type(rs.payload)} -> {rs.payload}')
+            raise AllGNFastCommands.kdc.InvalidResponseFormat(f'r.payload is not list. {type(rs.payload)} -> {rs.payload}')
 
         return rs.payload
 

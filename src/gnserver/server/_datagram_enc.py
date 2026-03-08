@@ -19,6 +19,7 @@ from aioquic.asyncio.protocol import QuicConnectionProtocol
 from aioquic.quic.connection import QuicConnection
 
 from gnobjects.net.objects import Url
+from gnobjects.net.fastcommands import AllGNFastCommands
 from gnobjects.net.tools import DomainMatcherList
 from gnobjects.net.domains import GNDomain
 
@@ -72,8 +73,7 @@ class ConnectionEncryptor:
         DestDomain = self.eEndpoint._kdc.getDomainById(cast(Any, keyid))
 
         if DestDomain is None:
-            print('ERROR: 143.822')
-            raise Exception('ERROR: 143.822')
+            raise AllGNFastCommands.transport.KeyDomainNotFound({'keyid': keyid})
         
         self_domain = self.eEndpoint._kdc._client._domain
         
@@ -103,8 +103,7 @@ class ConnectionEncryptor:
 
         if self.keyid is None:
             self.keyid = 0
-            print('ERROR: 143.823')
-            raise Exception('ERROR: 143.823')
+            raise AllGNFastCommands.transport.KeyIdNotFound({'domain': domain})
         
         key = self.eEndpoint._kdc.getKey(self.keyid) # type: ignore
 
@@ -315,7 +314,11 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
         d = await connectionEnc.initByKeyid(encryption_type, keyid)
         if self.active_key_synchronization_callback_domain_filter is not None and not self.active_key_synchronization_callback_domain_filter.match_any(d) and not GNDomain.isCore(d):
             connectionEnc.ready = None
-            raise Exception(f'Соединение {d} отклонено из за политики active_key_synchronization_callback_domain_filter: {self.DEPConfig.kdc_active_key_synchronization_domain_filter}')
+            raise AllGNFastCommands.transport.PolicyDenied({
+                'domain': d,
+                'policy': 'active_key_synchronization_callback_domain_filter',
+                'filter': self.DEPConfig.kdc_active_key_synchronization_domain_filter,
+            })
 
         # process queued datagrams for this peer after key becomes ready
         while not connectionEnc.not_ready_queue.empty():
@@ -562,7 +565,10 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
                             key = self._kdc.getKey(keyid)
                             if key is None:
                                 connectionEnc.ready = None # block
-                                raise Exception('Соединение отклонено из за политики kdc_active_key_synchronization')
+                                raise AllGNFastCommands.transport.PolicyDenied({
+                                    'policy': 'kdc_active_key_synchronization',
+                                    'keyid': keyid,
+                                })
 
                         # if key is missing, fetch asynchronously to avoid blocking inbound workers
                         if self._kdc.getKey(keyid) is None:
@@ -575,17 +581,27 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
                         d = await connectionEnc.initByKeyid(encryption_type, keyid)
                         if self.active_key_synchronization_callback_domain_filter is not None and not self.active_key_synchronization_callback_domain_filter.match_any(d) and not GNDomain.isCore(d):
                             connectionEnc.ready = None
-                            raise Exception(f'Соединение {d} отклонено из за политики active_key_synchronization_callback_domain_filter: {self.DEPConfig.kdc_active_key_synchronization_domain_filter}')
+                            raise AllGNFastCommands.transport.PolicyDenied({
+                                'domain': d,
+                                'policy': 'active_key_synchronization_callback_domain_filter',
+                                'filter': self.DEPConfig.kdc_active_key_synchronization_domain_filter,
+                            })
 
                     else:
                         if maddr[0] in ('::1', '127.0.0.1', '::ffff:127.0.0.1'):
                             if not self.DEPConfig.allow_local_unencrypted_connections:
                                 connectionEnc.ready = None
-                                raise Exception('Соединение отклонено из за политики DEPConfig.allow_local_unencrypted_connections')
+                                raise AllGNFastCommands.transport.PolicyDenied({
+                                    'policy': 'allow_local_unencrypted_connections',
+                                    'addr': maddr,
+                                })
                         else:
                             if not self.DEPConfig.allow_unencrypted_connections:
                                 connectionEnc.ready = None
-                                raise Exception('Соединение отклонено из за политики DEPConfig.allow_unencrypted_connections')
+                                raise AllGNFastCommands.transport.PolicyDenied({
+                                    'policy': 'allow_unencrypted_connections',
+                                    'addr': maddr,
+                                })
 
                         await connectionEnc.initRaw()
                         d = Url.ip_and_port_to_ipv6_with_port(maddr[0], maddr[1])

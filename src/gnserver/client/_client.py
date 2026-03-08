@@ -288,7 +288,7 @@ class AsyncClient:
             first_req = await gen.__anext__()
 
             if c is None:
-                raise Exception('unknown error')
+                raise AllGNFastCommands.transport.ConnectionError('unknown error')
 
             r = await c.asyncRequest(chain_async(first_req, gen))
 
