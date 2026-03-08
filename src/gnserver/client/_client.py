@@ -153,7 +153,10 @@ class AsyncClient:
 
             if c.status == 'connecting':
                 try:
-                    await asyncio.wait_for(c.connect_future, reconnect_wait or self._configuration.get('L5', {}).get('connection', {}).get('connect_timeout', 10))
+                    await asyncio.wait_for(
+                        asyncio.shield(c.connect_future),
+                        reconnect_wait or self._configuration.get('L5', {}).get('connection', {}).get('connect_timeout', 10)
+                    )
                     if c.status == 'active' and c._quik_core is not None:
                         logger.debug(f'Reusing active connection to {domain} (post-wait)')
                         return c
@@ -162,6 +165,10 @@ class AsyncClient:
                         raise AllGNFastCommands.transport.SendTimeout(f'Не удалось отправить запрос (таймаут соединения) с сервером {domain}')
                     elif c.status == 'disconnect':
                         raise AllGNFastCommands.transport.ConnectionError(f'Не удалось подключится к серверу {domain}')
+                except asyncio.exceptions.CancelledError:
+                    # On Python 3.13 a cancelled shared connect_future may surface here.
+                    # Treat as stale connection state and rebuild connection for this domain.
+                    await self.disconnect(domain)
                 except Exception:
                     await self.disconnect(domain)
             else:
@@ -186,10 +193,13 @@ class AsyncClient:
         try:
             await asyncio.wait_for(c.connect(data[0], data[1], keep_alive=keep_alive), reconnect_wait or self._configuration.get('L5', {}).get('connection', {}).get('connect_timeout', 10))
         except asyncio.exceptions.TimeoutError:
+            await self.disconnect(domain)
             raise AllGNFastCommands.transport.QuicHandshakeTimeout(f'Не удалось подключится к серверу {domain} (таймаут рукопожатия)')
         except asyncio.exceptions.CancelledError:
+            await self.disconnect(domain)
             raise AllGNFastCommands.transport.ConnectionError(f'Не удалось подключится к серверу {domain}')
         except:
+            await self.disconnect(domain)
             raise AllGNFastCommands.transport.ConnectionError(f'Не удалось подключится к серверу {domain}')
 
 

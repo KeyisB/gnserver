@@ -59,6 +59,7 @@ class ConnectionEncryptor:
         self.keyid: Optional[int] = 0
         self.domain: Optional[str] = None
         self.processing_lock = asyncio.Lock()
+        self.key_fetching = False
 
         
 
@@ -294,6 +295,33 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
     def dropProtocolState(self, proto: QuicProtocolShell):
         self.x_cid_domain.pop(proto._quic.original_destination_connection_id, None)
 
+    async def _fetch_key_and_resume(self, connectionEnc: ConnectionEncryptor, encryption_type: int, keyid: Tuple[int, int]):
+        try:
+            await self._kdc.requestKeyIfNotExist(keyid)
+
+            if self._inbound_global_lock_enabled:
+                async with self._inbound_global_lock:
+                    await self._finalize_key_and_flush(connectionEnc, encryption_type, keyid)
+            else:
+                async with connectionEnc.processing_lock:
+                    await self._finalize_key_and_flush(connectionEnc, encryption_type, keyid)
+        except Exception as e:
+            connectionEnc.ready = None
+            print(f'UDP key fetch error: {e}')
+        finally:
+            connectionEnc.key_fetching = False
+
+    async def _finalize_key_and_flush(self, connectionEnc: ConnectionEncryptor, encryption_type: int, keyid: Tuple[int, int]):
+        d = await connectionEnc.initByKeyid(encryption_type, keyid)
+        if self.active_key_synchronization_callback_domain_filter is not None and not self.active_key_synchronization_callback_domain_filter.match_any(d) and not GNDomain.isCore(d):
+            connectionEnc.ready = None
+            raise Exception(f'Соединение {d} отклонено из за политики active_key_synchronization_callback_domain_filter: {self.DEPConfig.kdc_active_key_synchronization_domain_filter}')
+
+        # process queued datagrams for this peer after key becomes ready
+        while not connectionEnc.not_ready_queue.empty():
+            raw, a = connectionEnc.not_ready_queue.get_nowait()
+            await self._handle_datagram(raw, a)
+
     async def _inbound_worker(self, worker_id: int, queue: Queue):
         while True:
             try:
@@ -528,14 +556,23 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
                     if encryption_type != 0: # encrypted
                         keyType = data[2]
                         key_id = int.from_bytes(data[3:10], 'big')
+                        keyid = (keyType, key_id)
 
                         if not self._kdc._active_key_synchronization:
-                            key = self._kdc.getKey((keyType, key_id))
+                            key = self._kdc.getKey(keyid)
                             if key is None:
                                 connectionEnc.ready = None # block
                                 raise Exception('Соединение отклонено из за политики kdc_active_key_synchronization')
 
-                        d = await connectionEnc.initByKeyid(encryption_type, (keyType, key_id))
+                        # if key is missing, fetch asynchronously to avoid blocking inbound workers
+                        if self._kdc.getKey(keyid) is None:
+                            connectionEnc.not_ready_queue.put_nowait((data, addr))
+                            if not connectionEnc.key_fetching:
+                                connectionEnc.key_fetching = True
+                                self.loop.create_task(self._fetch_key_and_resume(connectionEnc, encryption_type, keyid))
+                            return
+
+                        d = await connectionEnc.initByKeyid(encryption_type, keyid)
                         if self.active_key_synchronization_callback_domain_filter is not None and not self.active_key_synchronization_callback_domain_filter.match_any(d) and not GNDomain.isCore(d):
                             connectionEnc.ready = None
                             raise Exception(f'Соединение {d} отклонено из за политики active_key_synchronization_callback_domain_filter: {self.DEPConfig.kdc_active_key_synchronization_domain_filter}')
