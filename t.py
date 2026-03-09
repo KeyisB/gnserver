@@ -4,16 +4,32 @@ from GNServer import response, GNRequest, GNResponse
 
 
 
-dp = 'example.com'
+# dp = 'example.com'
 
-r = response.app.NotFound(f'No active nodes found for domain pattern: {dp}')
-
-
+# r = response.app.NotFound(f'No active nodes found for domain pattern: {dp}')
 
 
-if not r.command.ok:
-    print('Not ok')
 
 
-print(r.command.ok)
+# if not r.command.ok:
+#     print('Not ok')
 
+
+# print(r.command.ok)
+
+
+from gnobjects.net.tools import DomainMatcherList, DomainMatcher 
+
+from gnobjects.net.values import gn_core_domains
+
+x = [
+    '*~rgate.gn',
+    'planner.rgate.*~rcms.gn',
+    *['**.' + d for d in gn_core_domains],
+    *['**~' + d for d in gn_core_domains]
+]
+d = DomainMatcherList(x)
+
+print(x)
+
+print(d.match_any('core.dns.1~rcms.gn'))

@@ -2,3 +2,4 @@
 __pycache__/
 *.egg-info/
 pyproject.toml
+t.py

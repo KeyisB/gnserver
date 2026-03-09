@@ -135,6 +135,70 @@ class App:
         if self._datagramEndpoint is not None:
             self._datagramEndpoint.DEPConfig = config
 
+    @staticmethod
+    def _loadInterval(score_0_10000: int) -> str:
+        if score_0_10000 < 3000:
+            return 'low'
+        if score_0_10000 < 6000:
+            return 'medium'
+        if score_0_10000 < 8500:
+            return 'high'
+        return 'critical'
+
+    def getCurrentLoad(self) -> int:
+        if self._datagramEndpoint is None:
+            return 0
+
+        metrics = self._datagramEndpoint.getInboundLoadMetrics()
+
+        queue_fill_ratio = max(0.0, min(1.0, float(metrics.get('queue_fill_ratio', 0.0))))
+        drop_rate_10s = max(0.0, min(1.0, float(metrics.get('drop_rate_10s', 0.0))))
+        p95_udp_queue_wait_ms = max(0.0, float(metrics.get('p95_udp_queue_wait_ms', 0.0)))
+
+        # p95 queue wait normalization: >=250ms is considered fully saturated.
+        p95_wait_norm = min(1.0, p95_udp_queue_wait_ms / 250.0)
+
+        weighted = (
+            queue_fill_ratio * 0.40
+            + drop_rate_10s * 0.30
+            + p95_wait_norm * 0.20
+        )
+
+        # Normalize to full [0..1] range because the configured weights sum to 0.90.
+        normalized = min(1.0, weighted / 0.90)
+
+        score = int(round(normalized * 10000.0))
+        if score < 0:
+            return 0
+        if score > 10000:
+            return 10000
+        return score
+
+    def getCurrentLoadInfo(self) -> Dict[str, Union[str, int, float]]:
+        score = self.getCurrentLoad()
+
+        if self._datagramEndpoint is None:
+            return {
+                'score_0_10000': score,
+                'load_percent': score / 100.0,
+                'interval': self._loadInterval(score),
+                'window_seconds': 5.0,
+                'queue_fill_ratio': 0.0,
+                'drop_rate_10s': 0.0,
+                'p95_udp_queue_wait_ms': 0.0,
+            }
+
+        metrics = self._datagramEndpoint.getInboundLoadMetrics()
+        return {
+            'score_0_10000': score,
+            'load_percent': score / 100.0,
+            'interval': self._loadInterval(score),
+            'window_seconds': float(metrics.get('window_seconds', 5.0)),
+            'queue_fill_ratio': float(metrics.get('queue_fill_ratio', 0.0)),
+            'drop_rate_10s': float(metrics.get('drop_rate_10s', 0.0)),
+            'p95_udp_queue_wait_ms': float(metrics.get('p95_udp_queue_wait_ms', 0.0)),
+        }
+
     def addEventListener(self, name: _Name | str, * , move_to_start: bool = False) -> Callable[[Callable[P, Coroutine[Any, Any, R]]], Callable[P, Coroutine[Any, Any, R]]]:
         def decorator(fn: Callable[P, Coroutine[Any, Any, R]]):
             events = self._events.get(name, [])

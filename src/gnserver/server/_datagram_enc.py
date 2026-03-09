@@ -3,10 +3,12 @@ import os
 import sys
 import time
 import socket
+import math
+from collections import deque
 from Crypto.Cipher import AES
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives import hashes
-from typing import Optional, Callable, Union, cast, List, Any
+from typing import Optional, Callable, Union, cast, List, Any, Deque, Dict
 from .._kdc_object import KDCObject
 from aioquic.asyncio.server import QuicServer
 from aioquic.quic.connection import QuicConnection
@@ -274,6 +276,12 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
         self._inbound_drop_count = 0
         self._inbound_global_lock = asyncio.Lock()
 
+        # Sliding 5s UDP ingress telemetry used by App load score.
+        self._load_window_seconds = 5.0
+        self._load_accept_events: Deque[float] = deque()
+        self._load_drop_events: Deque[float] = deque()
+        self._load_queue_wait_ms_events: Deque[Tuple[float, float]] = deque()
+
         self.active_key_synchronization_callback_domain_filter = None
         if dEPConfig is not None:
             a = dEPConfig.kdc_active_key_synchronization_domain_filter
@@ -328,11 +336,20 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
     async def _inbound_worker(self, worker_id: int, queue: Queue):
         while True:
             try:
-                data, addr = await queue.get()
+                item = await queue.get()
             except asyncio.CancelledError:
                 break
 
             try:
+                if len(item) == 3:
+                    data, addr, enqueued_at = item
+                else:
+                    data, addr = item
+                    enqueued_at = time.monotonic()
+
+                wait_ms = max(0.0, (time.monotonic() - float(enqueued_at)) * 1000.0)
+                self._record_queue_wait_ms(wait_ms)
+
                 maddr = self.from_addr_to_maddr(addr)
                 connectionEnc = self.getDgEnc(maddr)
 
@@ -380,6 +397,62 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
             return 0
         maddr = self.from_addr_to_maddr(addr)
         return hash(maddr) % self._inbound_workers
+
+    def _prune_load_window(self, now: Optional[float] = None):
+        if now is None:
+            now = time.monotonic()
+
+        threshold = now - self._load_window_seconds
+
+        while self._load_accept_events and self._load_accept_events[0] < threshold:
+            self._load_accept_events.popleft()
+
+        while self._load_drop_events and self._load_drop_events[0] < threshold:
+            self._load_drop_events.popleft()
+
+        while self._load_queue_wait_ms_events and self._load_queue_wait_ms_events[0][0] < threshold:
+            self._load_queue_wait_ms_events.popleft()
+
+    def _record_queue_wait_ms(self, wait_ms: float, now: Optional[float] = None):
+        if now is None:
+            now = time.monotonic()
+
+        self._load_queue_wait_ms_events.append((now, wait_ms))
+        self._prune_load_window(now)
+
+    @staticmethod
+    def _p95(values: List[float]) -> float:
+        if not values:
+            return 0.0
+
+        ordered = sorted(values)
+        idx = max(0, math.ceil(0.95 * len(ordered)) - 1)
+        return float(ordered[idx])
+
+    def getInboundLoadMetrics(self) -> Dict[str, float]:
+        now = time.monotonic()
+        self._prune_load_window(now)
+
+        queue_capacity = max(1, self._inbound_workers * self._inbound_queue_size)
+        queue_size = sum(queue.qsize() for queue in self._inbound_queues)
+        queue_fill_ratio = min(1.0, queue_size / float(queue_capacity))
+
+        dropped = len(self._load_drop_events)
+        accepted = len(self._load_accept_events)
+        total = dropped + accepted
+        drop_rate = (dropped / total) if total > 0 else 0.0
+
+        p95_udp_queue_wait_ms = self._p95([value for _, value in self._load_queue_wait_ms_events])
+
+        return {
+            'window_seconds': self._load_window_seconds,
+            'queue_fill_ratio': queue_fill_ratio,
+            # Name kept for compatibility with balancer formula naming.
+            'drop_rate_10s': drop_rate,
+            'p95_udp_queue_wait_ms': p95_udp_queue_wait_ms,
+            'accepted_datagrams_window': float(accepted),
+            'dropped_datagrams_window': float(dropped),
+        }
     
     
     def connection_lost(self, exc):
@@ -423,11 +496,16 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
         if not self._inbound_started:
             self._start_inbound_workers()
 
+        now = time.monotonic()
+        self._prune_load_window(now)
+
         queue = self._inbound_queues[self._inbound_shard(addr)]
         try:
-            queue.put_nowait((data, addr))
+            queue.put_nowait((data, addr, now))
+            self._load_accept_events.append(now)
         except asyncio.QueueFull:
             self._inbound_drop_count += 1
+            self._load_drop_events.append(now)
             if self._inbound_drop_count == 1 or self._inbound_drop_count % 1024 == 0:
                 print(
                     f'UDP inbound queue overflow: dropped={self._inbound_drop_count}, '
