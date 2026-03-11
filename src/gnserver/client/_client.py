@@ -99,7 +99,8 @@ class AsyncClient:
         }
 
         self._dns_inflight: Dict[str, asyncio.Future] = {}
-        
+
+        self._rcms_id: Optional[int] = None
 
     def init(self,
              gn_crt: Union[bytes, str, Path],
@@ -123,6 +124,12 @@ class AsyncClient:
             active_key_synchronization_callback,
             active_key_synchronization_callback_domainFilter
         )
+
+        if 'data' in self._gn_crt_data:
+            data = self._gn_crt_data['data']
+
+            if 'rcms_id' in data:
+                self._rcms_id = data['rcms_id']
 
     
     def setDomain(self, domain: str):
@@ -299,13 +306,7 @@ class AsyncClient:
 
 
 
-
-    @overload
-    async def getDNS(self, domain: str, use_cache: bool = True, keep_alive: bool = False, raise_errors: Literal[False] = False, host: Optional[str] = None) -> GNResponse: ...
-    @overload
-    async def getDNS(self, domain: str, use_cache: bool = True, keep_alive: bool = False, raise_errors: Literal[True] = True, host: Optional[str] = None) -> str: ...
-
-    async def getDNS(self, domain: str, use_cache: bool = True, keep_alive: bool = False, raise_errors: bool = False, host: Optional[str] = None) -> Union[str, GNResponse]:
+    async def getDNS(self, domain: str, use_cache: bool = True, keep_alive: bool = False, host: Optional[str] = None) -> str:
 
         if domain in self._dns_inflight:
             return await self._dns_inflight[domain]
@@ -314,7 +315,7 @@ class AsyncClient:
         self._dns_inflight[domain] = fut
 
         try:
-            r = await self._getDNS(domain, use_cache=use_cache, keep_alive=keep_alive, raise_errors=raise_errors, host=host)
+            r = await self._get_dns_resolve(domain, use_cache=use_cache, keep_alive=keep_alive, host=host)
             fut.set_result(r)
             return r
         except Exception as e:
@@ -324,13 +325,16 @@ class AsyncClient:
             self._dns_inflight.pop(domain, None)
 
 
-    async def _getDNS(self, domain: str, use_cache: bool = True, keep_alive: bool = False, raise_errors: bool = False, host: Optional[str] = None) -> Union[str, GNResponse]:
+    async def _get_dns_resolve(self, domain: str, use_cache: bool = True, keep_alive: bool = False, host: Optional[str] = None) -> str:
+
+        if host is not None:
+            return Url.ipv4_with_port_to_ipv6_with_port(host)
 
         if AsyncClient._usercoredns_ is not None:
             p = AsyncClient._usercoredns_
             AsyncClient._usercoredns_ = None
             self._kdc.setDomainEcryptionType(AsyncClient._dns_core__domain, 0)
-            d: str = await self.getDNS(p, use_cache=False, keep_alive=False, raise_errors=True) # type: ignore
+            d: str = await self.getDNS(p, use_cache=False, keep_alive=False)
 
             AsyncClient._dns_core__domain = p
             AsyncClient._dns_core__ipv6 = d
@@ -346,39 +350,35 @@ class AsyncClient:
 
 
         if use_cache:
-            resuilt = self._dns_cache.get(domain)
-            if resuilt is not None:
-                if raise_errors:
-                    r1_data = resuilt.payload
-                    result = Url.ip_and_port_to_ipv6_with_port(r1_data['ip'], r1_data['port'])
-                else:
-                    result = resuilt
+            result = self._dns_cache.get(domain)
+            if result is not None:
                 return result
             
-        if host is not None:
-            return Url.ipv4_with_port_to_ipv6_with_port(host)
-            
-
-        if ':' in domain and domain.split('.')[-1].split(':')[0].isdigit() and domain.split(':')[-1].isdigit():
+        if domain.count(':') == 1: # it's ipv4 with port 100%
             return Url.ipv4_with_port_to_ipv6_with_port(domain)
-        
+        elif domain.count(':') > 1 and domain.count(']') == 0: # it's ipv6 without port
+            return domain
+        elif domain.count(':') > 1 and domain.count(']') == 1: # it's ipv6 with port
+            return domain
+
         if domain == _dns_core__domain:
             return _dns_core__ipv6
-        elif domain == 'api.dns.gn':
-            if self.__dns_gn__ipv4 is None:
-                a = await self._getDNS('!api.dns.gn', raise_errors=raise_errors)
-                if not isinstance(a, str):
-                    return a
-                else:
-                    self.__dns_gn__ipv4 = a
-            return self.__dns_gn__ipv4
-        elif domain.startswith('!'):
-            domain = domain[1:]
+
+        # if domain == 'api.dns.gn':
+        #     if self.__dns_gn__ipv4 is None:
+        #         a = await self._get_dns_resolve('!api.dns.gn')
+        #         if not isinstance(a, str):
+        #             return a
+        #         else:
+        #             self.__dns_gn__ipv4 = a
+        #     return self.__dns_gn__ipv4
+        # elif domain.startswith('!'):
+        #     domain = domain[1:]
 
         is_dns_core = GNDomain.isSys(domain) or GNDomain.isCore(domain)
         if not is_dns_core:
             if self.__dns_gn__ipv4 is None:
-                a = await self._getDNS('api.dns.gn', raise_errors=raise_errors)
+                a = await self._get_dns_resolve('api.dns.gn')
                 if not isinstance(a, str):
                     return a
                 else:
@@ -395,22 +395,19 @@ class AsyncClient:
         r1 = await self.request(GNRequest('get', Url(f'gn://{domain_dns}/getIp?d={domain}'), payload=domain), keep_alive=keep_alive)
 
         if not r1.command.ok:
-            if raise_errors:
-                raise r1
-            else:
-                return r1
+            raise r1
 
-        self._dns_cache.set(domain, r1, r1.payload.get('ttl', 60)) # type: ignore
+        r1_data = r1.payload
 
-        if raise_errors:
-            r1_data = r1.payload
-            result = Url.ip_and_port_to_ipv6_with_port(r1_data['ip'], r1_data['port']) # type: ignore
-        else:
-            result = r1
+        result = Url.ip_and_port_to_ipv6_with_port(r1_data['ip'], r1_data['port']) # type: ignore
+
+        self._dns_cache.set(domain, result, r1.payload.get('ttl', 60)) # type: ignore
+
         return result
+    
+    async def _get_gn_dns_request(self, domain: str, keep_alive: bool = False) -> str:
 
-    # def upgradeConnection(self, domain: str, alg: str): pass
-
+        raise NotImplementedError
 
 
 class RawQuicClient(QuicProtocolShell):
