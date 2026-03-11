@@ -145,9 +145,17 @@ class App:
             return 'high'
         return 'critical'
 
-    def getCurrentLoad(self) -> int:
+    def getCurrentLoadMetrics(self) -> dict:
         if self._datagramEndpoint is None:
-            return 0
+            return {
+                'score': 0,
+                'load_percent': 0.0,
+                'interval': self._loadInterval(0),
+                'window_seconds': 5.0,
+                'queue_fill_ratio': 0.0,
+                'drop_rate_10s': 0.0,
+                'p95_udp_queue_wait_ms': 0.0,
+            }
 
         metrics = self._datagramEndpoint.getInboundLoadMetrics()
 
@@ -169,28 +177,12 @@ class App:
 
         score = int(round(normalized * 10000.0))
         if score < 0:
-            return 0
+            score = 0
         if score > 10000:
-            return 10000
-        return score
-
-    def getCurrentLoadInfo(self) -> Dict[str, Union[str, int, float]]:
-        score = self.getCurrentLoad()
-
-        if self._datagramEndpoint is None:
-            return {
-                'score_0_10000': score,
-                'load_percent': score / 100.0,
-                'interval': self._loadInterval(score),
-                'window_seconds': 5.0,
-                'queue_fill_ratio': 0.0,
-                'drop_rate_10s': 0.0,
-                'p95_udp_queue_wait_ms': 0.0,
-            }
-
-        metrics = self._datagramEndpoint.getInboundLoadMetrics()
+            score = 10000
+        
         return {
-            'score_0_10000': score,
+            'score': score,
             'load_percent': score / 100.0,
             'interval': self._loadInterval(score),
             'window_seconds': float(metrics.get('window_seconds', 5.0)),
@@ -198,6 +190,7 @@ class App:
             'drop_rate_10s': float(metrics.get('drop_rate_10s', 0.0)),
             'p95_udp_queue_wait_ms': float(metrics.get('p95_udp_queue_wait_ms', 0.0)),
         }
+
 
     def addEventListener(self, name: _Name | str, * , move_to_start: bool = False) -> Callable[[Callable[P, Coroutine[Any, Any, R]]], Callable[P, Coroutine[Any, Any, R]]]:
         def decorator(fn: Callable[P, Coroutine[Any, Any, R]]):
