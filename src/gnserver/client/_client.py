@@ -187,7 +187,7 @@ class AsyncClient:
 
         c = QuicClient(self, domain)
         self._active_connections[domain] = c
-        data = await self.getDNS(domain, raise_errors=True, host=domain if request.url.isIp else None)
+        data = await self.getDNS(domain, host=domain if request.url.isIp else None)
 
         data = Url.ipv6_with_port_to_ipv6_and_port(data)
 
