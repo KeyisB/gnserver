@@ -1,6 +1,5 @@
 import os
 import sys
-import atexit
 import time
 import asyncio
 import datetime
@@ -13,8 +12,6 @@ from aioquic.quic.connection import QuicConnection
 from pathlib import Path
 import traceback
 import logging
-from logging.handlers import QueueHandler, QueueListener
-from queue import SimpleQueue
 
 from KeyisBTools import TTLDict
 from gnobjects.net.objects import GNRequest, GNResponse, Url, unpack_payload
@@ -36,69 +33,17 @@ if TYPE_CHECKING:
 logger = logging.getLogger("GNClient")
 logger.setLevel(logging.DEBUG)
 logger.propagate = False
-
-prev_listener = getattr(logger, "_gn_queue_listener", None)
-if prev_listener is not None:
-    try:
-        prev_listener.stop()
-    except Exception:
-        pass
-
-prev_stream = getattr(logger, "_gn_queue_stream", None)
-if prev_stream is not None and prev_stream is not sys.stdout:
-    try:
-        prev_stream.close()
-    except Exception:
-        pass
-
-if logger.handlers:
+if logger.hasHandlers():
     logger.handlers.clear()
 
 formatter = logging.Formatter(
     "[%(asctime)s] [%(name)s] %(levelname)s: %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S"
 )
-
-try:
-    stream = os.fdopen(
-        os.dup(sys.stdout.fileno()),
-        "w",
-        buffering=1,
-        encoding=getattr(sys.stdout, "encoding", None) or "utf-8",
-        errors="backslashreplace",
-        closefd=True,
-    )
-except Exception:
-    stream = sys.stdout
-
-stream_handler = logging.StreamHandler(stream)
-stream_handler.setLevel(logging.DEBUG)
-stream_handler.setFormatter(formatter)
-
-record_queue = SimpleQueue()
-queue_handler = QueueHandler(record_queue)
-queue_handler.setLevel(logging.DEBUG)
-
-listener = QueueListener(record_queue, stream_handler, respect_handler_level=True)
-listener.start()
-
-logger.addHandler(queue_handler)
-setattr(logger, "_gn_queue_listener", listener)
-setattr(logger, "_gn_queue_stream", stream)
-
-def _shutdown_logging() -> None:
-    try:
-        listener.stop()
-    except Exception:
-        pass
-    try:
-        if stream is not sys.stdout:
-            stream.close()
-    except Exception:
-        pass
-
-
-atexit.register(_shutdown_logging)
+console = logging.StreamHandler(sys.stdout)
+console.setLevel(logging.DEBUG)
+console.setFormatter(formatter)
+logger.addHandler(console)
 
 
 
@@ -420,16 +365,16 @@ class AsyncClient:
         if domain == _dns_core__domain:
             return _dns_core__ipv6
 
-        # if domain == 'api.dns.gn':
-        #     if self.__dns_gn__ipv4 is None:
-        #         a = await self._get_dns_resolve('!api.dns.gn')
-        #         if not isinstance(a, str):
-        #             return a
-        #         else:
-        #             self.__dns_gn__ipv4 = a
-        #     return self.__dns_gn__ipv4
-        # elif domain.startswith('!'):
-        #     domain = domain[1:]
+        if domain == 'api.dns.gn':
+            if self.__dns_gn__ipv4 is None:
+                a = await self._get_dns_resolve('!api.dns.gn')
+                if not isinstance(a, str):
+                    return a
+                else:
+                    self.__dns_gn__ipv4 = a
+            return self.__dns_gn__ipv4
+        elif domain.startswith('!'):
+            domain = domain[1:]
 
         is_dns_core = GNDomain.isSys(domain) or GNDomain.isCore(domain)
         if not is_dns_core:

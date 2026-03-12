@@ -3,15 +3,12 @@
 
 import os
 import sys
-import atexit
 import asyncio
 import inspect
 import traceback
 import socket
 import datetime
 import logging
-from logging.handlers import QueueHandler, QueueListener
-from queue import SimpleQueue
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union, AsyncGenerator, cast, Coroutine, ParamSpec, Concatenate, TypeVar, Literal
 from aioquic.asyncio.server import QuicServer
 from aioquic.quic.configuration import QuicConfiguration
@@ -53,77 +50,21 @@ except ImportError:
 
 
 
-def _create_logger(name: str) -> logging.Logger:
-    logger = logging.getLogger(name)
-    logger.setLevel(logging.DEBUG)
-    logger.propagate = False
+logger = logging.getLogger("GNServer")
+logger.setLevel(logging.DEBUG)
+logger.propagate = False
+if logger.hasHandlers():
+    logger.handlers.clear()
 
-    prev_listener = getattr(logger, "_gn_queue_listener", None)
-    if prev_listener is not None:
-        try:
-            prev_listener.stop()
-        except Exception:
-            pass
+console = logging.StreamHandler(sys.stdout)
+console.setLevel(logging.DEBUG)
+formatter = logging.Formatter(
+    "[%(asctime)s] [%(name)s] %(levelname)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+console.setFormatter(formatter)
 
-    prev_stream = getattr(logger, "_gn_queue_stream", None)
-    if prev_stream is not None and prev_stream is not sys.stdout:
-        try:
-            prev_stream.close()
-        except Exception:
-            pass
-
-    if logger.handlers:
-        logger.handlers.clear()
-
-    formatter = logging.Formatter(
-        "[%(asctime)s] [%(name)s] %(levelname)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S"
-    )
-
-    try:
-        stream = os.fdopen(
-            os.dup(sys.stdout.fileno()),
-            "w",
-            buffering=1,
-            encoding=getattr(sys.stdout, "encoding", None) or "utf-8",
-            errors="backslashreplace",
-            closefd=True,
-        )
-    except Exception:
-        stream = sys.stdout
-
-    stream_handler = logging.StreamHandler(stream)
-    stream_handler.setLevel(logging.DEBUG)
-    stream_handler.setFormatter(formatter)
-
-    record_queue = SimpleQueue()
-    queue_handler = QueueHandler(record_queue)
-    queue_handler.setLevel(logging.DEBUG)
-
-    listener = QueueListener(record_queue, stream_handler, respect_handler_level=True)
-    listener.start()
-
-    logger.addHandler(queue_handler)
-    setattr(logger, "_gn_queue_listener", listener)
-    setattr(logger, "_gn_queue_stream", stream)
-
-    def _shutdown_logging() -> None:
-        try:
-            listener.stop()
-        except Exception:
-            pass
-        try:
-            if stream is not sys.stdout:
-                stream.close()
-        except Exception:
-            pass
-
-    atexit.register(_shutdown_logging)
-
-    return logger
-
-
-logger = _create_logger("GNServer")
+logger.addHandler(console)
 
 _Name = Union[Literal['start'], str]
 
