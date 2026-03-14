@@ -559,7 +559,7 @@ class App:
 
                 await self.sendResponseFromRequest(request, response)
             except Exception as e:
-                if isinstance(e, (GNRequest, GNFastCommand)):
+                if isinstance(e, (GNResponse, GNFastCommand)):
                     await self.sendResponseFromRequest(request, e)
                 else:
                     logger.error('InternalServerError:\n'  + traceback.format_exc())

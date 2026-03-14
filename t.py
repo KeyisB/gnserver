@@ -18,18 +18,34 @@ from GNServer import response, GNRequest, GNResponse
 # print(r.command.ok)
 
 
-from gnobjects.net.tools import DomainMatcherList, DomainMatcher 
+# from gnobjects.net.tools import DomainMatcherList, DomainMatcher 
 
-from gnobjects.net.values import gn_core_domains
+# from gnobjects.net.values import gn_core_domains
 
-x = [
-    '*~rgate.gn',
-    'planner.rgate.*~rcms.gn',
-    *['**.' + d for d in gn_core_domains],
-    *['**~' + d for d in gn_core_domains]
-]
-d = DomainMatcherList(x)
+# x = [
+#     '*~rgate.gn',
+#     'planner.rgate.*~rcms.gn',
+#     *['**.' + d for d in gn_core_domains],
+#     *['**~' + d for d in gn_core_domains]
+# ]
+# d = DomainMatcherList(x)
 
-print(x)
+# print(x)
 
-print(d.match_any('core.dns.1~rcms.gn'))
+# print(d.match_any('core.dns.1~rcms.gn'))
+
+
+from KeyisBTools.models.serialization import deserialize, serialize
+
+import datetime
+
+
+
+t = datetime.datetime.now(datetime.timezone.utc)
+
+
+print(t)
+s = serialize({'123': [t, t, t], t: '123'})
+print(s)
+t2 = deserialize(s)
+print(t2)

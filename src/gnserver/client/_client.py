@@ -147,6 +147,7 @@ class AsyncClient:
 
   
     async def connect(self, request: GNRequest, restart_connection: bool = False, reconnect_wait: float = 10, keep_alive: bool = True) -> 'QuicClient':
+        print(f'Connecting START to {request.url} (restart_connection={restart_connection}, reconnect_wait={reconnect_wait}, keep_alive={keep_alive})')
         domain = request.url.hostname
 
         if restart_connection and domain in self._active_connections:
@@ -156,7 +157,7 @@ class AsyncClient:
             c = self._active_connections[domain]
 
             if c.status == 'active' and c._quik_core is not None:
-                logger.debug(f'Reusing active connection to {domain}')
+                #logger.debug(f'Reusing active connection to {domain}')
                 return c
 
             if c.status == 'connecting':
@@ -166,7 +167,7 @@ class AsyncClient:
                         reconnect_wait or self._configuration.get('L5', {}).get('connection', {}).get('connect_timeout', 10)
                     )
                     if c.status == 'active' and c._quik_core is not None:
-                        logger.debug(f'Reusing active connection to {domain} (post-wait)')
+                        #logger.debug(f'Reusing active connection to {domain} (post-wait)')
                         return c
                     elif c.status == 'connecting':
                         await self.disconnect(domain)
@@ -190,8 +191,10 @@ class AsyncClient:
         data = await self.getDNS(domain, host=domain if request.url.isIp else None)
 
         data = Url.ipv6_with_port_to_ipv6_and_port(data)
+        print(f'Connecting to {domain} dns: {data} (restart_connection={restart_connection}, reconnect_wait={reconnect_wait}, keep_alive={keep_alive})')
 
-
+        # if data[0].startswith('::ffff:'):
+        #     data = (data[0][7:], data[1])
 
         def f(domain):
             if domain in self._active_connections:
@@ -249,7 +252,7 @@ class AsyncClient:
 
     async def request(self, request: GNRequest, keep_alive: bool = True, restart_connection: bool = False, reconnect_wait: float = 10, only_request: bool = False) -> GNResponse:
 
-        print(f'Request: {request.method} {request.url}')
+        logger.debug(f'Request: {request.method} {request.url}')
 
         if isinstance(request, GNRequest):
             
@@ -401,6 +404,7 @@ class AsyncClient:
         r1_data = r1.payload
 
         result = Url.ip_and_port_to_ipv6_with_port(r1_data['ip'], r1_data['port']) # type: ignore
+        
 
         self._dns_cache.set(domain, result, r1.payload.get('ttl', 60)) # type: ignore
 
@@ -550,10 +554,10 @@ class RawQuicClient(QuicProtocolShell):
         if only_request:
             return AllGNFastCommands.transport.NoResponse()
         
-        print(f'Waiting for response on stream {sid}...')
+        #print(f'Waiting for response on stream {sid}...')
         try:
             data = await asyncio.wait_for(fut, 30)
-            print(f'Response received on stream {sid}, length: {len(data) if data else "None"} bytes')
+            #print(f'Response received on stream {sid}, length: {len(data) if data else "None"} bytes')
         except asyncio.exceptions.TimeoutError:
             self._inflight.pop(sid, None)
             self._timed_out_streams.add(sid)
@@ -568,11 +572,11 @@ class RawQuicClient(QuicProtocolShell):
                 self._timed_out_streams.clear()
             print(traceback.format_exc())
             return AllGNFastCommands.transport.ConnectionError()
-        print(f'Raw response data: {data[:100] if data else "None"}{"..." if data and len(data) > 100 else ""}')
+        #print(f'Raw response data: {data[:100] if data else "None"}{"..." if data and len(data) > 100 else ""}')
         if data is None:
             return AllGNFastCommands.transport.ConnectionError()
         
-        print(f'Deserializing response on stream {sid}...')
+        #print(f'Deserializing response on stream {sid}...')
 
         r = self._deserialize(data, False)
         return r
