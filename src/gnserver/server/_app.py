@@ -747,7 +747,7 @@ class App:
     def fastFile(self, path: str, file_path: str | Path):
         if isinstance(file_path, Path):
             file_path = str(file_path)
-        if file_path.endswith('/'):
+        if file_path.endswith('/') and file_path != '/':
             file_path = file_path[:-1]
         @self.get(path) # type: ignore
         async def r_static():
@@ -760,7 +760,7 @@ class App:
         async def r_static(_path: str):
             file_path = os.path.join(dir_path, _path)
             
-            if file_path.endswith('/'):
+            if file_path.endswith('/') and file_path != '/':
                 file_path = file_path[:-1]
                 
             return responses.ok(await _path_to_tdo(file_path))
