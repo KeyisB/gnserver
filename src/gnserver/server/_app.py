@@ -141,10 +141,13 @@ class App:
     @staticmethod
     def _build_path_candidates(path: str) -> Tuple[str, ...]:
         p = path or '/'
+        if p == '/':
+            return ('/',)
+
         alt = p.rstrip('/') or '/'
 
         if p == alt:
-            extra = '//' if p == '/' else f'{p}/'
+            extra = f'{p}/'
             return (p, extra)
 
         return (p, alt)
@@ -869,10 +872,19 @@ class App:
             )
 
     def fastFile(self, path: str, file_path: str | Path):
+        path = path.strip()
+        if not path:
+            path = '/'
+        if not path.startswith('/'):
+            path = f'/{path}'
+        if len(path) > 1 and path.endswith('/'):
+            path = path[:-1]
+
         if isinstance(file_path, Path):
             file_path = str(file_path)
         if file_path.endswith('/') and file_path != '/':
             file_path = file_path[:-1]
+
         @self.get(path) # type: ignore
         async def r_static():
             return responses.ok(await _path_to_tdo(file_path))
