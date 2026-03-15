@@ -68,6 +68,23 @@ logger.addHandler(console)
 
 _Name = Union[Literal['start'], str]
 
+async def _path_to_tdo(path: str) -> TempDataObject:
+    if not os.path.isfile(path):
+        raise AllGNFastCommands.NotFound()
+
+    fileObject = FileObject(path)
+    d, m = await fileObject.assembly()
+
+    if m.count(':') == 1 and '/' not in m: # one interpret with version
+        m, v = m.rsplit(':', 1)
+        v = int(v)
+    else:
+        v = 0
+
+    tdo = TempDataObject()
+    tdo.setPayloadITP(m, v, d)
+    return tdo
+
 
 class App:
     def __init__(self, only_client: bool = False):
@@ -331,55 +348,7 @@ class App:
         raise AllGNFastCommands.NotFound()
 
 
-    def fastFile(self, path: str, file_path: str, cors: Optional[CORSObject] = None, inType: Optional[str] = None):
-        @self.get(path)  # type: ignore
-        async def r_static():
-            nonlocal file_path
-            if file_path.endswith('/'):
-                file_path = file_path[:-1]
-                
-            if not os.path.isfile(file_path):
-                raise AllGNFastCommands.NotFound()
-
-            fileObject = FileObject(file_path)
-            d, m = await fileObject.assembly()
-            return responses.ok({
-                'data': d,
-                'mime-type': m
-            })
-
-    def staticDir(self, path: str, dir_path: str, cors: Optional[CORSObject] = None, inType: Optional[str] = None):
-        @self.get(f"{path}/{{_path:path}}")  # type: ignore
-        async def r_static(_path: str):
-            file_path = os.path.join(dir_path, _path)
-            
-            if file_path.endswith('/'):
-                file_path = file_path[:-1]
-                
-            if not os.path.isfile(file_path):
-                raise AllGNFastCommands.NotFound()
-            
-            fileObject = FileObject(file_path)
-            d, m = await fileObject.assembly()
-            return responses.ok({
-                'data': d,
-                'mime-type': m
-            })
-
-
-    def routeObject(self, object: Union[TempDataObject, TempDataGroup]):
-        @self.route(object.method, object.path, route='tdo')  # type: ignore
-        async def _r_static(request):
-            return responses.ok(object)
-
-    def _init_sys_routes(self):
-        @self.post('/!gn-vm-host/ping', cors=CORSObject(allow_client_types=['server', 'net']))
-        async def r_ping(request: GNRequest):
-            if request.client.ip not in ('::1', '127.0.0.1'):
-                raise AllGNFastCommands.Forbidden()
-            return responses.ok({'time': datetime.datetime.now(datetime.timezone.utc).isoformat()})
-
-
+  
 
     class _ServerProto(QuicProtocolShell):
         def __init__(self, *a, api: "App", datagramEndpoint: DatagramEndpoint, **kw):
@@ -774,3 +743,28 @@ class App:
                 tls_keyfile=data.get('key_path'), # type: ignore
                 host=data.get('host', '0.0.0.0')
             )
+
+    def fastFile(self, path: str, file_path: str):
+        if file_path.endswith('/'):
+            file_path = file_path[:-1]
+        @self.get(path) # type: ignore
+        async def r_static():
+            return responses.ok(await _path_to_tdo(file_path))
+
+    def staticDir(self, path: str, dir_path: str):
+        @self.get(f"{path}/{{_path:path}}")  # type: ignore
+        async def r_static(_path: str):
+            file_path = os.path.join(dir_path, _path)
+            
+            if file_path.endswith('/'):
+                file_path = file_path[:-1]
+                
+            return responses.ok(await _path_to_tdo(file_path))
+
+    def _init_sys_routes(self):
+        @self.post('/!gn-vm-host/ping', cors=CORSObject(allow_client_types=['server', 'net']))
+        async def r_ping(request: GNRequest):
+            if request.client.ip not in ('::1', '127.0.0.1'):
+                raise AllGNFastCommands.Forbidden()
+            return responses.ok({'time': datetime.datetime.now(datetime.timezone.utc).isoformat()})
+
