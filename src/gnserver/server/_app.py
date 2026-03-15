@@ -93,6 +93,19 @@ class App:
         self._cors: Optional[CORSObject] = None
         self._events: Dict[str, List[Dict[str, Union[Any, Callable]]]] = {}
 
+        # Route indexes for hot path dispatch.
+        self._route_order_seq: int = 0
+        self._route_order: Dict[int, int] = {}
+        self._route_is_static: Dict[int, bool] = {}
+        self._route_static_index: Dict[str, Dict[str, List[Route]]] = {}
+        self._route_dynamic_prefix_index: Dict[str, Dict[str, List[Route]]] = {}
+        self._route_dynamic_fallback_index: Dict[str, List[Route]] = {}
+
+        # Per-route cached handler metadata.
+        self._route_param_names: Dict[int, set[str]] = {}
+        self._route_annotations: Dict[int, Dict[str, Any]] = {}
+        self._route_is_asyncgen: Dict[int, bool] = {}
+
         self.domain: str = None # type: ignore
 
         self.DEPConfig = DEPConfig()
@@ -105,6 +118,110 @@ class App:
 
         self.connections: Dict[str, App._ServerProto] = {}
 
+    @staticmethod
+    def _is_static_route_path(path_expr: str) -> bool:
+        return path_expr != '*' and not path_expr.startswith('!') and '{' not in path_expr
+
+    @staticmethod
+    def _extract_first_literal_segment(path_expr: str) -> Optional[str]:
+        if path_expr == '*' or path_expr.startswith('!'):
+            return None
+        if not path_expr.startswith('/'):
+            return None
+
+        rest = path_expr.lstrip('/')
+        if not rest:
+            return None
+
+        seg = rest.split('/', 1)[0]
+        if not seg or '{' in seg:
+            return None
+        return seg
+
+    @staticmethod
+    def _build_path_candidates(path: str) -> Tuple[str, ...]:
+        p = path or '/'
+        alt = p.rstrip('/') or '/'
+
+        if p == alt:
+            extra = '//' if p == '/' else f'{p}/'
+            return (p, extra)
+
+        return (p, alt)
+
+    @staticmethod
+    def _path_first_segment(path: str) -> Optional[str]:
+        p = path.strip('/')
+        if not p:
+            return None
+        return p.split('/', 1)[0]
+
+    def _route_scopes(self, request_route: Optional[str]) -> Tuple[Optional[str], ...]:
+        if request_route == '*':
+            return ('*',)
+        return (request_route, '*')
+
+    @staticmethod
+    def _match_route_path(route: Route, path_candidates: Tuple[str, ...]):
+        for candidate in path_candidates:
+            m = route.regex.fullmatch(candidate)
+            if m is not None:
+                return m
+        return None
+
+    def _index_route(self, route: Route) -> None:
+        rid = id(route)
+        self._route_order[rid] = self._route_order_seq
+        self._route_order_seq += 1
+
+        sig = inspect.signature(route.handler)
+        self._route_param_names[rid] = set(sig.parameters.keys())
+        self._route_annotations[rid] = {name: p.annotation for name, p in sig.parameters.items()}
+        self._route_is_asyncgen[rid] = inspect.isasyncgenfunction(route.handler)
+
+        is_static = self._is_static_route_path(route.path_expr)
+        self._route_is_static[rid] = is_static
+
+        route_bucket = route.route
+
+        if is_static:
+            static_map = self._route_static_index.setdefault(route_bucket, {})
+            static_map.setdefault(route.path_expr, []).append(route)
+            return
+
+        seg = self._extract_first_literal_segment(route.path_expr)
+        if seg is None:
+            self._route_dynamic_fallback_index.setdefault(route_bucket, []).append(route)
+            return
+
+        prefix_map = self._route_dynamic_prefix_index.setdefault(route_bucket, {})
+        prefix_map.setdefault(seg, []).append(route)
+
+    def _collect_candidate_routes(self, request_route: Optional[str], path_candidates: Tuple[str, ...]) -> List[Route]:
+        by_id: Dict[int, Route] = {}
+
+        first_segments = {
+            seg
+            for seg in (self._path_first_segment(p) for p in path_candidates)
+            if seg is not None
+        }
+
+        for scope in self._route_scopes(request_route):
+            static_map = self._route_static_index.get(cast(str, scope), {})
+            for p in path_candidates:
+                for r in static_map.get(p, ()):  # exact path bucket
+                    by_id.setdefault(id(r), r)
+
+            dynamic_prefix_map = self._route_dynamic_prefix_index.get(cast(str, scope), {})
+            for seg in first_segments:
+                for r in dynamic_prefix_map.get(seg, ()):  # literal first-segment bucket
+                    by_id.setdefault(id(r), r)
+
+            for r in self._route_dynamic_fallback_index.get(cast(str, scope), ()):  # regex/wildcard bucket
+                by_id.setdefault(id(r), r)
+
+        return sorted(by_id.values(), key=lambda r: self._route_order.get(id(r), 0))
+
     async def sendObject(self, domain:str, object: Union[TempDataObject, TempDataGroup, GNRequest, GNResponse], end_stream: bool = True):
         a = self.connections.get(domain)
         if a is None:
@@ -112,22 +229,22 @@ class App:
         await a.sendObject(object, end_stream)
 
     def route(self, method: str, path: str, cors: Optional[CORSObject] = None, route:str = 'api'):
-        if path == '/':
-            path = ''
+        if path == '':
+            path = '/'
         def decorator(fn: Callable[Concatenate[GNRequest, P], Coroutine[None, None, Union[GNResponse, TempDataObject, TempDataGroup, GNRequest, None]]]):
             regex, param_types = _compile_path(path)
-            self._routes.append(
-                Route(
-                    route,
-                    method,
-                    path,
-                    regex,
-                    param_types,
-                    _ensure_async(fn),
-                    fn.__name__,
-                    cors
-                )
+            route_obj = Route(
+                route,
+                method,
+                path,
+                regex,
+                param_types,
+                _ensure_async(fn),
+                fn.__name__,
+                cors
             )
+            self._routes.append(route_obj)
+            self._index_route(route_obj)
             register_schema_by_key(fn)
             return fn
         return decorator
@@ -248,37 +365,45 @@ class App:
         self, request: GNRequest,
         proto: Optional["_ServerProto"] = None
     ) -> Union[GNResponse, AsyncGenerator[GNResponse, None]]:
-        path    = request.url.path
-        method  = request.method
-        cand    = {path, path.rstrip("/") or "/", f"{path}/"}
+        path = request.url.path
+        method = request.method
+        path_candidates = self._build_path_candidates(path)
+        candidate_routes = self._collect_candidate_routes(request.route, path_candidates)
         allowed = set()
 
-        for r in self._routes:
-            if r.route != request.route and r.route != '*':
-                continue
+        for r in candidate_routes:
 
             if hasattr(request, '_gn_server_proxy_list'):
                 if r in request._gn_server_proxy_list: # type: ignore
                     continue
-        
-            m = next((r.regex.fullmatch(p) for p in cand if r.regex.fullmatch(p)), None)
-            if not m:
-                continue
+
+            rid = id(r)
+
+            if self._route_is_static.get(rid, False):
+                if r.path_expr not in path_candidates:
+                    continue
+                path_params: Dict[str, Any] = {}
+            else:
+                m = self._match_route_path(r, path_candidates)
+                if m is None:
+                    continue
+                path_params = m.groupdict()
 
             allowed.add(r.method)
             if r.method != method and r.method != '*':
                 continue
 
+            params = self._route_param_names[rid]
+            annotations = self._route_annotations[rid]
+
             resolve_cors(request, r.cors)
 
-            sig = inspect.signature(r.handler)
             def _ann(name: str):
-                param = sig.parameters.get(name)
-                return param.annotation if param else inspect._empty
+                return annotations.get(name, inspect._empty)
 
             kw: dict[str, Any] = {
                 name: _convert_value(val, _ann(name), r.param_types.get(name, str))
-                for name, val in m.groupdict().items()
+                for name, val in path_params.items()
             }
 
             for qn, qvals in request.url.params.items():
@@ -291,7 +416,6 @@ class App:
                     kw[qn] = _convert_value(raw, _ann(qn), str)
 
             
-            params = set(sig.parameters.keys())
             kw = {k: v for k, v in kw.items() if k in params}
 
             
@@ -299,13 +423,13 @@ class App:
             if rv is not None:
                 raise AllGNFastCommands.UnprocessableEntity({'dev_error': rv, 'user_error': f'Server request error {self.domain}'})
 
-            if "request" in sig.parameters:
+            if "request" in params:
                 kw["request"] = request
 
-            if "proto" in sig.parameters:
+            if "proto" in params:
                 kw["proto"] = proto
 
-            if inspect.isasyncgenfunction(r.handler):
+            if self._route_is_asyncgen[rid]:
                 return r.handler(**kw)
 
             result = await r.handler(**kw)
@@ -756,7 +880,18 @@ class App:
     def staticDir(self, path: str, dir_path: str | Path):
         if isinstance(dir_path, Path):
             dir_path = str(dir_path)
-        @self.get(f"{path}/{{_path:path}}")  # type: ignore
+
+        path = path.strip()
+        if not path:
+            path = '/'
+        if not path.startswith('/'):
+            path = f'/{path}'
+        if len(path) > 1 and path.endswith('/'):
+            path = path[:-1]
+
+        wildcard_path = f"{path}/{{_path:path}}" if path != '/' else "/{_path:path}"
+
+        @self.get(wildcard_path)  # type: ignore
         async def r_static(_path: str):
             file_path = os.path.join(dir_path, _path)
             
