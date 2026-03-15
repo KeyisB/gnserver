@@ -19,6 +19,7 @@ from aioquic.quic.events import (
     ConnectionTerminated,
     StreamDataReceived,
 )
+from pathlib import Path
 P = ParamSpec("P")
 R = TypeVar("R")
 
@@ -743,14 +744,18 @@ class App:
                 host=data.get('host', '0.0.0.0')
             )
 
-    def fastFile(self, path: str, file_path: str):
+    def fastFile(self, path: str, file_path: str | Path):
+        if isinstance(file_path, Path):
+            file_path = str(file_path)
         if file_path.endswith('/'):
             file_path = file_path[:-1]
         @self.get(path) # type: ignore
         async def r_static():
             return responses.ok(await _path_to_tdo(file_path))
 
-    def staticDir(self, path: str, dir_path: str):
+    def staticDir(self, path: str, dir_path: str | Path):
+        if isinstance(dir_path, Path):
+            dir_path = str(dir_path)
         @self.get(f"{path}/{{_path:path}}")  # type: ignore
         async def r_static(_path: str):
             file_path = os.path.join(dir_path, _path)
