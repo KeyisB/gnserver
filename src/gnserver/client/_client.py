@@ -147,7 +147,6 @@ class AsyncClient:
 
   
     async def connect(self, request: GNRequest, restart_connection: bool = False, reconnect_wait: float = 10, keep_alive: bool = True) -> 'QuicClient':
-        print(f'Connecting START to {request.url} (restart_connection={restart_connection}, reconnect_wait={reconnect_wait}, keep_alive={keep_alive})')
         domain = request.url.hostname
 
         if restart_connection and domain in self._active_connections:
@@ -184,7 +183,6 @@ class AsyncClient:
                 # stale client instance can remain briefly in map during races
                 self._active_connections.pop(domain, None)
 
-        print(f'Connecting to {domain} (restart_connection={restart_connection}, reconnect_wait={reconnect_wait}, keep_alive={keep_alive})')
 
         c = QuicClient(self, domain)
         self._active_connections[domain] = c
@@ -269,6 +267,36 @@ class AsyncClient:
             for f in self.__request_callbacks.values():
                 asyncio.create_task(f(request))
             r = await c.asyncRequest(request, only_request=only_request)
+
+            retry_connect_request = (
+                isinstance(r, GNResponse)
+                and not only_request
+                and request.url.path == '/gn/connect'
+                and (
+                    r.command.transport.ReceiveTimeout
+                    or r.command.transport.ConnectionError
+                    or r.command.transport.SocketClosed
+                )
+            )
+
+            if retry_connect_request:
+                logger.warning(
+                    f"Retrying {request.method} {request.url} after transport failure: {r.command}"
+                )
+                try:
+                    c = await self.connect(
+                        request,
+                        restart_connection=True,
+                        reconnect_wait=reconnect_wait,
+                        keep_alive=keep_alive,
+                    )
+                    r = await c.asyncRequest(request, only_request=only_request)
+                except BaseException as e:
+                    if isinstance(e, GNResponse):
+                        r = e
+                    else:
+                        r = GNResponse(str(e), payload=traceback.format_exc())
+
             logger.debug(f'Response: {request.method} {request.url} -> {r.command} {r.payload if len(str(r.payload)) < 512 else f'len({len(str(r.payload))})'}')
 
             for f in self.__response_callbacks.values():
@@ -694,7 +722,7 @@ class QuicClient:
                     del fut
                 else:
                     if not fut.done():
-                        fut.set_exception(Exception)
+                        fut.set_exception(Exception())
 
 
 
@@ -715,4 +743,14 @@ class QuicClient:
                 raise RuntimeError("Connection not active")
 
         resp = await self._quik_core.request(request, only_request=only_request)
+
+        # After transport-level timeout/errors the current QUIC session can become stale.
+        # Drop it so the next request reconnects instead of reusing a broken session.
+        if isinstance(resp, GNResponse):
+            if resp.command.transport:
+                logger.warning(
+                    f"Transport session degraded for {self.domain}: {resp.command}. Reconnecting on next request."
+                )
+                await self.disconnect()
+
         return resp
