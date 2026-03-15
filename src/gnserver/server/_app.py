@@ -224,7 +224,7 @@ class App:
 
         return sorted(by_id.values(), key=lambda r: self._route_order.get(id(r), 0))
 
-    async def sendObject(self, domain:str, object: Union[TempDataObject, TempDataGroup, GNRequest, GNResponse], end_stream: bool = True):
+    async def sendObject(self, domain:str, object: Union[GNRequest, GNResponse], end_stream: bool = True):
         a = self.connections.get(domain)
         if a is None:
             return
@@ -661,6 +661,10 @@ class App:
             await self._resolve_dev_transport_response(response, request)
 
             logger.debug(f'[>] [{request.client.domain}] Response: {request.method} {request.url} -> {response.command} {response.payload if len(str(response.payload)) < 256 else ''}')
+
+            if response.stream_id not in self._quic._streams:
+                logger.warning(f"Stream {response.stream_id} not found for response, skipping send")
+                return
             
             await self.sendRawResponse(request.stream_id, response=response, end_stream=end_stream)  # type: ignore
 
@@ -670,14 +674,8 @@ class App:
             self._quic.send_stream_data(stream_id, blob, end_stream=end_stream) # type: ignore
             self.transmit()
         
-        async def sendObject(self, object: Union[TempDataObject, TempDataGroup, GNRequest, GNResponse], end_stream: bool = True):
-            if isinstance(object, TempDataGroup):
-                await object.assemble()
-                blob = object.serialize()
-            elif isinstance(object, TempDataObject):
-                object.assemble()
-                blob = await object.serialize()
-            elif isinstance(object, GNRequest):
+        async def sendObject(self, object: Union[GNRequest, GNResponse], end_stream: bool = True):
+            if isinstance(object, GNRequest):
                 blob = object.serialize()
             elif isinstance(object, GNResponse):
                 object.assembly()
@@ -687,6 +685,7 @@ class App:
             
             sid = self._quic.get_next_available_stream_id()
             self._quic.send_stream_data(sid, blob, end_stream=end_stream)
+            self.transmit()
 
     def run(
         self,
