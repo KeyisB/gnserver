@@ -302,7 +302,7 @@ class AsyncClient:
             for f in self.__response_callbacks.values():
                 asyncio.create_task(f(r))
 
-            return r
+            return r # type: ignore
         
         else:
 
@@ -615,7 +615,7 @@ class RawQuicClient(QuicProtocolShell):
         
         
         if isinstance(d, GNRequest):
-            return await d.serialize()
+            return d.serialize()
         return d.serialize()
             
 

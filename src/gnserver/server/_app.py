@@ -25,7 +25,6 @@ R = TypeVar("R")
 
 from gnobjects.net.objects import GNRequest, GNResponse, FileObject, CORSObject, TempDataGroup, TempDataObject, Url
 from gnobjects.net.fastcommands import AllGNFastCommands, GNFastCommand, AllGNFastCommands as responses
-from gnobjects.net.objects import pack_payload, unpack_payload
 
 from KeyisBTools.bytes.transformation import userFriendly
 from KeyisBTools.models.serialization import deserialize
@@ -666,7 +665,7 @@ class App:
             await self.sendRawResponse(request.stream_id, response=response, end_stream=end_stream)  # type: ignore
 
         async def sendRawResponse(self, stream_id: int, response: GNResponse, end_stream: bool = True):
-            await response.assembly()
+            response.assembly()
             blob = response.serialize()
             self._quic.send_stream_data(stream_id, blob, end_stream=end_stream) # type: ignore
             self.transmit()
@@ -679,9 +678,9 @@ class App:
                 object.assemble()
                 blob = await object.serialize()
             elif isinstance(object, GNRequest):
-                blob = await object.serialize()
+                blob = object.serialize()
             elif isinstance(object, GNResponse):
-                await object.assembly()
+                object.assembly()
                 blob = object.serialize()
             else:
                 raise TypeError(f'Unsupported object type: {type(object)}')
