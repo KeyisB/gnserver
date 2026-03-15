@@ -662,8 +662,8 @@ class App:
 
             logger.debug(f'[>] [{request.client.domain}] Response: {request.method} {request.url} -> {response.command} {response.payload if len(str(response.payload)) < 256 else ''}')
 
-            if response.stream_id not in self._quic._streams:
-                logger.warning(f"Stream {response.stream_id} not found for response, skipping send")
+            if request.stream_id not in self._quic._streams:
+                logger.warning(f"Stream {request.stream_id} not found for response, skipping send")
                 return
             
             await self.sendRawResponse(request.stream_id, response=response, end_stream=end_stream)  # type: ignore
