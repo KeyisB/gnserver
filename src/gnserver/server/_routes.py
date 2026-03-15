@@ -51,7 +51,7 @@ _CONVERTER_FUNC: dict[str, Callable[[str], Any]] = {
 def _compile_path(path: str) -> tuple[Pattern[str], dict[str, Callable[[str], Any]]]:
     if path == '*':
         return re.compile('.' + path), {}
-    if path[0] == '!':
+    if len(path) > 1 and path[0] == '!':
         path = path[1:]
         return re.compile(path), {}
     param_types: dict[str, Callable[[str], Any]] = {}
