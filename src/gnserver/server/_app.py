@@ -81,8 +81,7 @@ async def _path_to_tdo(path: str) -> TempDataObject:
     else:
         v = 0
 
-    tdo = TempDataObject()
-    tdo.setPayloadITP(m, v, d)
+    tdo = TempDataObject(m, v, d)
     return tdo
 
 
