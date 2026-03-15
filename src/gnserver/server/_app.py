@@ -71,7 +71,7 @@ _Name = Union[Literal['start'], str]
 
 async def _path_to_tdo(path: str) -> TempDataObject:
     if not os.path.isfile(path):
-        raise AllGNFastCommands.NotFound()
+        raise AllGNFastCommands.NotFound({'code': 3, 'message': f'File not found: {path}'})
 
     fileObject = FileObject(path)
     d, m = await fileObject.assembly()
@@ -452,15 +452,6 @@ class App:
 
             if isinstance(result, GNResponse):
                 c = r.cors
-                if c is None:
-                    if isinstance(result.payload, TempDataObject):
-                        if result.payload.cors is not None:
-                            c = result.payload.cors
-                    elif isinstance(result.payload, TempDataGroup):
-                        for tdo in result.payload.payload:
-                            if tdo.cors is not None:
-                                resolve_cors(request, tdo.cors)
-
                 if c is not None:
                     resolve_cors(request, c)
 
@@ -472,7 +463,7 @@ class App:
 
         if allowed:
             raise AllGNFastCommands.MethodNotAllowed()
-        raise AllGNFastCommands.NotFound()
+        raise AllGNFastCommands.NotFound({'code': 3, 'message': f'Path not found: {path}'})
 
 
   
