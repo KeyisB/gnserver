@@ -446,9 +446,11 @@ class AsyncClient:
 class RawQuicClient(QuicProtocolShell):
 
     def __init__(self, quic: QuicConnection, datagramEndpoint, client: 'QuicClient', stream_handler):
-        self._client = client
-        
         super().__init__(quic, datagramEndpoint=datagramEndpoint, client=True, stream_handler=stream_handler)
+
+        # Preserve a typed reference to QuicClient. The base class stores a bool
+        # in self._client to mark client mode, so this assignment must happen after super().__init__.
+        self._QuicClient = client
 
         self.quicClient: QuicClient = None # type: ignore
 
@@ -490,19 +492,21 @@ class RawQuicClient(QuicProtocolShell):
 
             handler = self._inflight.get(event.stream_id)
             if handler is None:
-                if self._client._client.server is None:
+                if self._QuicClient._client.server is None:
                     return
                 buf = self._buffer.setdefault(event.stream_id, bytearray())
                 buf.extend(event.data)
                 if not event.end_stream:
                     return
                 self._inflight.pop(event.stream_id, None)
+                print(f'RECIEVE DATA: buffer: {self._buffer.get(event.stream_id)}')
                 data = bytes(self._buffer.pop(event.stream_id, b""))
 
                 u = unpack_payload(data)
+                print(f'RECIEVE DATA: payload: {u}')
                 if not isinstance(u, GNRequest):
                     u = GNRequest('get', Url('gn://[::1]/'), payload=u, route=':receive') # type: ignore
-                self._loop.create_task(self._client._client.server.dispatchRequest(u))
+                self._loop.create_task(self._QuicClient._client.server.dispatchRequest(u))
             else:
                 if not isinstance(handler, asyncio.Queue):
                     buf = self._buffer.setdefault(event.stream_id, bytearray())

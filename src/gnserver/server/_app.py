@@ -25,6 +25,8 @@ R = TypeVar("R")
 
 from gnobjects.net.objects import GNRequest, GNResponse, FileObject, CORSObject, TempDataGroup, TempDataObject, Url
 from gnobjects.net.fastcommands import AllGNFastCommands, GNFastCommand, AllGNFastCommands as responses
+from gnobjects.net.objects import pack_payload, unpack_payload
+
 
 from KeyisBTools.bytes.transformation import userFriendly
 from KeyisBTools.models.serialization import deserialize
@@ -38,6 +40,8 @@ from ..client._client import AsyncClient
 from ._datagram_enc import QuicProtocolShell, DatagramEndpoint
 
 from ._models import DEPConfig
+
+
 
 
 try:
@@ -462,7 +466,7 @@ class App:
 
         if allowed:
             raise AllGNFastCommands.MethodNotAllowed()
-        raise AllGNFastCommands.NotFound({'code': 3, 'message': f'Path not found: {path}'})
+        raise AllGNFastCommands.NotFound({'code': 3, 'message': f'Path not found: {path}: request: {request} ; payload: {request.payload}'})
 
 
   
@@ -675,13 +679,10 @@ class App:
             self.transmit()
         
         async def sendObject(self, object: Union[GNRequest, GNResponse], end_stream: bool = True):
-            if isinstance(object, GNRequest):
-                blob = object.serialize()
-            elif isinstance(object, GNResponse):
-                object.assembly()
-                blob = object.serialize()
-            else:
-                raise TypeError(f'Unsupported object type: {type(object)}')
+            blob = pack_payload(object)
+
+            if blob is None:
+                raise Exception('Error in sendObject. unknown object type.')
             
             sid = self._quic.get_next_available_stream_id()
             self._quic.send_stream_data(sid, blob, end_stream=end_stream)

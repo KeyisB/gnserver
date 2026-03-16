@@ -5,6 +5,7 @@ import time
 import socket
 import math
 from collections import deque
+import traceback
 from Crypto.Cipher import AES
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives import hashes
@@ -363,7 +364,7 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                print(f'UDP worker[{worker_id}] error: {e}')
+                print(f'UDP worker[{worker_id}] error: {traceback.format_exc()}')
             finally:
                 queue.task_done()
 
