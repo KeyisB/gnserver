@@ -499,14 +499,18 @@ class RawQuicClient(QuicProtocolShell):
                 if not event.end_stream:
                     return
                 self._inflight.pop(event.stream_id, None)
-                print(f'RECIEVE DATA: buffer: {self._buffer.get(event.stream_id)}')
                 data = bytes(self._buffer.pop(event.stream_id, b""))
 
-                u = unpack_payload(data)
-                print(f'RECIEVE DATA: payload: {u}')
-                if not isinstance(u, GNRequest):
-                    u = GNRequest('get', Url('gn://[::1]/'), payload=u, route=':receive') # type: ignore
-                self._loop.create_task(self._QuicClient._client.server.dispatchRequest(u))
+                request = GNRequest.deserialize(data)
+
+                request.client._data['domain'] = self._QuicClient.domain
+
+                network_paths = getattr(self._quic, "_network_paths", None)
+                request.client._data['remote_addr'] = network_paths[0].addr if network_paths else None
+                request.stream_id = event.stream_id   # type: ignore
+                request._assembly_server()
+
+                self._loop.create_task(self._QuicClient._client.server.dispatchRequest(request))
             else:
                 if not isinstance(handler, asyncio.Queue):
                     buf = self._buffer.setdefault(event.stream_id, bytearray())

@@ -228,11 +228,11 @@ class App:
 
         return sorted(by_id.values(), key=lambda r: self._route_order.get(id(r), 0))
 
-    async def sendObject(self, domain:str, object: Union[GNRequest, GNResponse], end_stream: bool = True):
-        a = self.connections.get(domain)
+    async def sendRequest(self, request: GNRequest, end_stream: bool = True):
+        a = self.connections.get(request.url.hostname)
         if a is None:
             return
-        await a.sendObject(object, end_stream)
+        await a.sendRequest(request, end_stream)
 
     def route(self, method: str, path: str, cors: Optional[CORSObject] = None, route:str = 'api'):
         if path == '':
@@ -678,12 +678,8 @@ class App:
             self._quic.send_stream_data(stream_id, blob, end_stream=end_stream) # type: ignore
             self.transmit()
         
-        async def sendObject(self, object: Union[GNRequest, GNResponse], end_stream: bool = True):
-            blob = pack_payload(object)
-
-            if blob is None:
-                raise Exception('Error in sendObject. unknown object type.')
-            
+        async def sendRequest(self, request: GNRequest, end_stream: bool = True):
+            blob = request.serialize()
             sid = self._quic.get_next_available_stream_id()
             self._quic.send_stream_data(sid, blob, end_stream=end_stream)
             self.transmit()
