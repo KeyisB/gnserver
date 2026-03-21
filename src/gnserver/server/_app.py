@@ -1,6 +1,5 @@
 
 
-
 import os
 import sys
 import asyncio
@@ -25,7 +24,6 @@ R = TypeVar("R")
 
 from gnobjects.net.objects import GNRequest, GNResponse, FileObject, CORSObject, TempDataGroup, TempDataObject, Url
 from gnobjects.net.fastcommands import AllGNFastCommands, GNFastCommand, AllGNFastCommands as responses
-from gnobjects.net.objects import pack_payload, unpack_payload
 
 
 from KeyisBTools.bytes.transformation import userFriendly
@@ -76,16 +74,7 @@ async def _path_to_tdo(path: str) -> TempDataObject:
     if not os.path.isfile(path):
         raise AllGNFastCommands.NotFound({'code': 3, 'message': f'File not found: {path}'})
 
-    fileObject = FileObject(path)
-    d, m = await fileObject.assembly()
-
-    if m.count(':') == 1 and '/' not in m: # one interpret with version
-        m, v = m.rsplit(':', 1)
-        v = int(v)
-    else:
-        v = 0
-
-    tdo = TempDataObject(m, v, d)
+    tdo = await FileObject(path).toTempDataObject()
     return tdo
 
 
@@ -673,7 +662,6 @@ class App:
             await self.sendRawResponse(request.stream_id, response=response, end_stream=end_stream)  # type: ignore
 
         async def sendRawResponse(self, stream_id: int, response: GNResponse, end_stream: bool = True):
-            response.assembly()
             blob = response.serialize()
             self._quic.send_stream_data(stream_id, blob, end_stream=end_stream) # type: ignore
             self.transmit()

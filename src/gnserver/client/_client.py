@@ -14,7 +14,7 @@ import traceback
 import logging
 
 from KeyisBTools import TTLDict
-from gnobjects.net.objects import GNRequest, GNResponse, Url, unpack_payload
+from gnobjects.net.objects import GNRequest, GNResponse, Url
 from gnobjects.net.fastcommands import AllGNFastCommands
 from gnobjects.net.domains import GNDomain
 
@@ -755,7 +755,7 @@ class QuicClient:
         # After transport-level timeout/errors the current QUIC session can become stale.
         # Drop it so the next request reconnects instead of reusing a broken session.
         if isinstance(resp, GNResponse):
-            if resp.command.transport:
+            if resp.command.transport and not resp.command.transport.NoResponse:
                 logger.warning(
                     f"Transport session degraded for {self.domain}: {resp.command}. Reconnecting on next request."
                 )

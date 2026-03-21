@@ -41,11 +41,30 @@ import datetime
 
 
 
-t = datetime.datetime.now(datetime.timezone.utc)
+# t = datetime.datetime.now(datetime.timezone.utc)
 
 
-print(t)
-s = serialize({'123': [t, t, t], t: '123'})
-print(s)
-t2 = deserialize(s)
-print(t2)
+# print(t)
+# s = serialize({'123': [t, t, t], t: '123'})
+# print(s)
+# t2 = deserialize(s)
+# print(t2)
+
+
+
+
+from gnobjects.net.objects import TempDataObject
+
+
+t = TempDataObject('html', b'<html><body>Hello, World!</body></html>')
+
+c = t.container
+
+nt = TempDataObject(c)
+
+s = nt.serialize()
+
+des = TempDataObject.deserialize(s)
+
+
+print(des)
