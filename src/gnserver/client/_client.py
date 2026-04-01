@@ -458,7 +458,7 @@ class RawQuicClient(QuicProtocolShell):
         self._queue_user: Deque[Tuple[int, bytes, bool]] = deque()
 
         self._inflight: Dict[int, Union[asyncio.Future, asyncio.Queue[Optional[GNResponse]]]] = {}
-        self._inflight_streams: Dict[int, bytearray] = {}
+        self._inflight_streams: Dict[int, Dict[str, Any]] = {}
         self._buffer: Dict[Union[int, str], bytearray] = {}
         self._timed_out_streams: set[int] = set()
 
@@ -483,6 +483,98 @@ class RawQuicClient(QuicProtocolShell):
     def stop(self):
         self._running = False
 
+    def _feed_incoming_request(self, stream_id: int, data: bytes, end_stream: bool) -> Optional[GNRequest]:
+        state = self._inflight_streams.get(stream_id)
+
+        if state is None:
+            buf = self._buffer.setdefault(stream_id, bytearray())
+            buf.extend(data)
+
+            header = GNRequest.try_deserialize_header(bytes(buf))
+            if header is None:
+                if end_stream:
+                    raise ValueError(f'Incomplete GNRequest header on closed stream {stream_id}')
+                return None
+
+            request, payload_offset, payload_present = header
+            state = {
+                'message': request,
+                'payload_present': payload_present,
+                'payload': bytearray(),
+            }
+
+            if payload_present:
+                cast(bytearray, state['payload']).extend(buf[payload_offset:])
+
+            self._buffer.pop(stream_id, None)
+            self._inflight_streams[stream_id] = state
+        else:
+            if cast(bool, state['payload_present']):
+                cast(bytearray, state['payload']).extend(data)
+
+        if not end_stream:
+            return None
+
+        self._inflight_streams.pop(stream_id, None)
+        request = cast(GNRequest, state['message'])
+        if cast(bool, state['payload_present']):
+            request.setSerializedPayload(bytes(cast(bytearray, state['payload'])))
+        return request
+
+    def _feed_incoming_response(self, stream_id: int, data: bytes, end_stream: bool) -> Optional[GNResponse]:
+        state = self._inflight_streams.get(stream_id)
+
+        if state is None:
+            buf = self._buffer.setdefault(stream_id, bytearray())
+            buf.extend(data)
+
+            header = GNResponse.try_deserialize_header(bytes(buf))
+            if header is None:
+                if end_stream:
+                    raise ValueError(f'Incomplete GNResponse header on closed stream {stream_id}')
+                return None
+
+            response, payload_offset, payload_length = header
+            trailing = bytes(buf[payload_offset:])
+
+            if payload_length is None:
+                if trailing:
+                    raise ValueError('Trailing bytes after payload-less GNResponse')
+            elif len(trailing) > payload_length:
+                raise ValueError('GNResponse payload exceeds declared size')
+
+            state = {
+                'message': response,
+                'payload_length': payload_length,
+                'payload': bytearray(trailing),
+            }
+
+            self._buffer.pop(stream_id, None)
+            self._inflight_streams[stream_id] = state
+        else:
+            payload_length = cast(Optional[int], state['payload_length'])
+            if payload_length is None:
+                if data:
+                    raise ValueError('Unexpected bytes for payload-less GNResponse')
+            else:
+                payload = cast(bytearray, state['payload'])
+                payload.extend(data)
+                if len(payload) > payload_length:
+                    raise ValueError('GNResponse payload exceeds declared size')
+
+        if not end_stream:
+            return None
+
+        self._inflight_streams.pop(stream_id, None)
+        response = cast(GNResponse, state['message'])
+        payload_length = cast(Optional[int], state['payload_length'])
+        if payload_length is not None:
+            payload = cast(bytearray, state['payload'])
+            if len(payload) != payload_length:
+                raise ValueError('Truncated GNResponse payload')
+            response.setSerializedPayload(bytes(payload))
+        return response
+
     def quic_event_received(self, event: QuicEvent) -> None:
         if isinstance(event, StreamDataReceived):
             if event.stream_id in self._timed_out_streams:
@@ -494,14 +586,9 @@ class RawQuicClient(QuicProtocolShell):
             if handler is None:
                 if self._QuicClient._client.server is None:
                     return
-                buf = self._buffer.setdefault(event.stream_id, bytearray())
-                buf.extend(event.data)
-                if not event.end_stream:
+                request = self._feed_incoming_request(event.stream_id, event.data, event.end_stream)
+                if request is None:
                     return
-                self._inflight.pop(event.stream_id, None)
-                data = bytes(self._buffer.pop(event.stream_id, b""))
-
-                request = GNRequest.deserialize(data)
 
                 request.client._data['domain'] = self._QuicClient.domain
 
@@ -513,14 +600,20 @@ class RawQuicClient(QuicProtocolShell):
                 self._loop.create_task(self._QuicClient._client.server.dispatchRequest(request))
             else:
                 if not isinstance(handler, asyncio.Queue):
-                    buf = self._buffer.setdefault(event.stream_id, bytearray())
-                    buf.extend(event.data)
-                    if not event.end_stream:
+                    try:
+                        response = self._feed_incoming_response(event.stream_id, event.data, event.end_stream)
+                    except Exception as exc:
+                        self._inflight.pop(event.stream_id, None)
+                        self._buffer.pop(event.stream_id, None)
+                        self._inflight_streams.pop(event.stream_id, None)
+                        if not handler.done():
+                            handler.set_exception(exc)
+                        return
+                    if response is None:
                         return
                     self._inflight.pop(event.stream_id, None)
-                    data = bytes(self._buffer.pop(event.stream_id, b""))
                     if not handler.done():
-                        handler.set_result(data)
+                        handler.set_result(response)
                 else:
                     raise NotImplementedError
                 
@@ -528,6 +621,8 @@ class RawQuicClient(QuicProtocolShell):
         # ─── RESET ──────────────────────────────────────────
         elif isinstance(event, StreamReset):
             handler = self._inflight.pop(event.stream_id, None)
+            self._buffer.pop(event.stream_id, None)
+            self._inflight_streams.pop(event.stream_id, None)
             if handler is None:
                 return
             if isinstance(handler, asyncio.Queue):
@@ -596,6 +691,8 @@ class RawQuicClient(QuicProtocolShell):
             #print(f'Response received on stream {sid}, length: {len(data) if data else "None"} bytes')
         except asyncio.exceptions.TimeoutError:
             self._inflight.pop(sid, None)
+            self._buffer.pop(sid, None)
+            self._inflight_streams.pop(sid, None)
             self._timed_out_streams.add(sid)
             if len(self._timed_out_streams) > 8192:
                 self._timed_out_streams.clear()
@@ -603,6 +700,8 @@ class RawQuicClient(QuicProtocolShell):
             return AllGNFastCommands.transport.ReceiveTimeout()
         except Exception:
             self._inflight.pop(sid, None)
+            self._buffer.pop(sid, None)
+            self._inflight_streams.pop(sid, None)
             self._timed_out_streams.add(sid)
             if len(self._timed_out_streams) > 8192:
                 self._timed_out_streams.clear()
@@ -611,6 +710,9 @@ class RawQuicClient(QuicProtocolShell):
         #print(f'Raw response data: {data[:100] if data else "None"}{"..." if data and len(data) > 100 else ""}')
         if data is None:
             return AllGNFastCommands.transport.ConnectionError()
+
+        if isinstance(data, GNResponse):
+            return data
         
         #print(f'Deserializing response on stream {sid}...')
 

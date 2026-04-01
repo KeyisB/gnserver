@@ -467,7 +467,7 @@ class App:
             super().__init__(*a, datagramEndpoint=datagramEndpoint, client=False, **kw)
             self.setDatagramEndpoint(datagramEndpoint)
             self._buffer: Dict[int, bytearray] = {}
-            self._streams: Dict[int, Tuple[asyncio.Queue[Optional[GNRequest]], bool]] = {}
+            self._streams: Dict[int, Dict[str, Any]] = {}
 
             self._domain: Optional[str] = cast(Optional[str], self.datagramEndpoint.getDomain(self))
             self._disconnected = False
@@ -476,16 +476,50 @@ class App:
             self._refresh_domain()
 
             asyncio.create_task(self._api.dispatchEvent('connect', proto=self, domain=self._domain))
+
+        def _feed_request_stream(self, stream_id: int, data: bytes, end_stream: bool) -> Optional[GNRequest]:
+            state = self._streams.get(stream_id)
+
+            if state is None:
+                buf = self._buffer.setdefault(stream_id, bytearray())
+                buf.extend(data)
+
+                header = GNRequest.try_deserialize_header(bytes(buf))
+                if header is None:
+                    if end_stream:
+                        raise ValueError(f'Incomplete GNRequest header on closed stream {stream_id}')
+                    return None
+
+                request, payload_offset, payload_present = header
+                state = {
+                    'request': request,
+                    'payload_present': payload_present,
+                    'payload': bytearray(),
+                }
+
+                if payload_present:
+                    cast(bytearray, state['payload']).extend(buf[payload_offset:])
+
+                self._buffer.pop(stream_id, None)
+                self._streams[stream_id] = state
+            else:
+                if cast(bool, state['payload_present']):
+                    cast(bytearray, state['payload']).extend(data)
+
+            if not end_stream:
+                return None
+
+            self._streams.pop(stream_id, None)
+            request = cast(GNRequest, state['request'])
+            if cast(bool, state['payload_present']):
+                request.setSerializedPayload(bytes(cast(bytearray, state['payload'])))
+            return request
             
         def quic_event_received(self, event: QuicEvent):
             if isinstance(event, StreamDataReceived):
-                buf = self._buffer.setdefault(event.stream_id, bytearray())
-                buf.extend(event.data)
-
-                stream_id = event.stream_id
-
-                if event.end_stream:
-                    asyncio.create_task(self._resolve_raw_request(stream_id, buf))
+                request = self._feed_request_stream(event.stream_id, event.data, event.end_stream)
+                if request is not None:
+                    asyncio.create_task(self._resolve_request(event.stream_id, request))
             
 
             elif isinstance(event, ConnectionTerminated):
@@ -505,6 +539,7 @@ class App:
 
             # release per-connection memory on disconnect
             self._buffer.clear()
+            self._streams.clear()
 
             if self._domain is not None and self._api.connections.get(self._domain) is self:
                 self._api.connections.pop(self._domain, None)
@@ -534,10 +569,8 @@ class App:
 
             return self._domain
 
-        async def _resolve_raw_request(self, stream_id: int, data: bytes):
+        async def _resolve_request(self, stream_id: int, request: GNRequest):
             try:
-                request = GNRequest.deserialize(data)
-
                 self._refresh_domain()
 
                 await self._resolve_dev_transport_request(request)
@@ -564,6 +597,7 @@ class App:
                     logger.error('Raw request error response failed:\n' + traceback.format_exc())
             finally:
                 self._buffer.pop(stream_id, None)
+                self._streams.pop(stream_id, None)
 
         async def _resolve_dev_transport_request(self, request: GNRequest):
             if not request.transportObject.routeProtocol.dev:
