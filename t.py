@@ -53,18 +53,17 @@ import datetime
 
 
 
-from gnobjects.net.objects import TempDataObject
+from gnobjects.net.objects import TempDataObject, GNRequest, GNResponse, Url
 
 
-t = TempDataObject('html', b'<html><body>Hello, World!</body></html>')
+#t = TempDataObject('html', b'<html><body>Hello, World!</body></html>')
 
-c = t.container
+t = TempDataObject.STP('sdfdsgfsgsfgfd')
 
-nt = TempDataObject(c)
+r = GNRequest('', Url('gn://test.com/test'), payload=t)
 
-s = nt.serialize()
+s = r.serialize()
 
-des = TempDataObject.deserialize(s)
+des = GNRequest.deserialize(s)
 
-
-print(des)
+print(des.payload)

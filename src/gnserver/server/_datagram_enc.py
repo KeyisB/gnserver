@@ -69,6 +69,7 @@ class ConnectionEncryptor:
 
     async def initByKeyid(self, encryption_type: int, keyid: Tuple[int, int]) -> str:
         self.encryption_type = encryption_type
+        self.keyid = keyid
         await self.eEndpoint._kdc.requestKeyIfNotExist(keyid)
 
         key = self.eEndpoint._kdc.getKey(keyid)
@@ -90,6 +91,8 @@ class ConnectionEncryptor:
         return DestDomain
 
     async def initRaw(self):
+        self.encryption_type = 0
+        self.keyid = 0
         self.ready = True
 
     
@@ -302,6 +305,62 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
 
     def dropProtocolState(self, proto: QuicProtocolShell):
         self.x_cid_domain.pop(proto._quic.original_destination_connection_id, None)
+
+    async def _init_encrypted_initial_connection(
+        self,
+        connectionEnc: ConnectionEncryptor,
+        encryption_type: int,
+        keyid: Tuple[int, int],
+        data: bytes,
+        addr,
+    ) -> Optional[str]:
+        if not self._kdc._active_key_synchronization:
+            key = self._kdc.getKey(keyid)
+            if key is None:
+                connectionEnc.ready = None
+                raise AllGNFastCommands.transport.PolicyDenied({
+                    'policy': 'kdc_active_key_synchronization',
+                    'keyid': keyid,
+                })
+
+        if self._kdc.getKey(keyid) is None:
+            connectionEnc.not_ready_queue.put_nowait((data, addr))
+            if not connectionEnc.key_fetching:
+                connectionEnc.key_fetching = True
+                self.loop.create_task(self._fetch_key_and_resume(connectionEnc, encryption_type, keyid))
+            return None
+
+        d = await connectionEnc.initByKeyid(encryption_type, keyid)
+        if self.active_key_synchronization_callback_domain_filter is not None and not self.active_key_synchronization_callback_domain_filter.match_any(d) and not GNDomain.isCore(d):
+            connectionEnc.ready = None
+            raise AllGNFastCommands.transport.PolicyDenied({
+                'domain': d,
+                'policy': 'active_key_synchronization_callback_domain_filter',
+                'filter': self.DEPConfig.kdc_active_key_synchronization_domain_filter,
+            })
+
+        return d
+
+    async def _init_unencrypted_initial_connection(self, connectionEnc: ConnectionEncryptor, maddr: Tuple[str, int, int]) -> str:
+        if maddr[0] in ('::1', '127.0.0.1', '::ffff:127.0.0.1'):
+            if not self.DEPConfig.allow_local_unencrypted_connections:
+                connectionEnc.ready = None
+                raise AllGNFastCommands.transport.PolicyDenied({
+                    'policy': 'allow_local_unencrypted_connections',
+                    'addr': maddr,
+                })
+        else:
+            if not self.DEPConfig.allow_unencrypted_connections:
+                connectionEnc.ready = None
+                raise AllGNFastCommands.transport.PolicyDenied({
+                    'policy': 'allow_unencrypted_connections',
+                    'addr': maddr,
+                })
+
+        await connectionEnc.initRaw()
+        d = Url.ip_and_port_to_ipv6_with_port(maddr[0], maddr[1])
+        connectionEnc.domain = d
+        return d
 
     async def _fetch_key_and_resume(self, connectionEnc: ConnectionEncryptor, encryption_type: int, keyid: Tuple[int, int]):
         try:
@@ -634,72 +693,50 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
                     self.transport.addV4maddr(maddr)
 
                 encryption_type = data[1] & 0x0F
+                incoming_keyid: Optional[Tuple[int, int]] = None
+                if encryption_type != 0:
+                    keyType = data[2]
+                    key_id = int.from_bytes(data[3:10], 'big')
+                    incoming_keyid = (keyType, key_id)
+
                 if not connectionEnc.ready:
                     if encryption_type != 0: # encrypted
-                        keyType = data[2]
-                        key_id = int.from_bytes(data[3:10], 'big')
-                        keyid = (keyType, key_id)
-
-                        if not self._kdc._active_key_synchronization:
-                            key = self._kdc.getKey(keyid)
-                            if key is None:
-                                connectionEnc.ready = None # block
-                                raise AllGNFastCommands.transport.PolicyDenied({
-                                    'policy': 'kdc_active_key_synchronization',
-                                    'keyid': keyid,
-                                })
-
-                        # if key is missing, fetch asynchronously to avoid blocking inbound workers
-                        if self._kdc.getKey(keyid) is None:
-                            connectionEnc.not_ready_queue.put_nowait((data, addr))
-                            if not connectionEnc.key_fetching:
-                                connectionEnc.key_fetching = True
-                                self.loop.create_task(self._fetch_key_and_resume(connectionEnc, encryption_type, keyid))
+                        d = await self._init_encrypted_initial_connection(connectionEnc, encryption_type, cast(Tuple[int, int], incoming_keyid), data, addr)
+                        if d is None:
                             return
 
-                        d = await connectionEnc.initByKeyid(encryption_type, keyid)
-                        if self.active_key_synchronization_callback_domain_filter is not None and not self.active_key_synchronization_callback_domain_filter.match_any(d) and not GNDomain.isCore(d):
-                            connectionEnc.ready = None
-                            raise AllGNFastCommands.transport.PolicyDenied({
-                                'domain': d,
-                                'policy': 'active_key_synchronization_callback_domain_filter',
-                                'filter': self.DEPConfig.kdc_active_key_synchronization_domain_filter,
-                            })
-
                     else:
-                        if maddr[0] in ('::1', '127.0.0.1', '::ffff:127.0.0.1'):
-                            if not self.DEPConfig.allow_local_unencrypted_connections:
-                                connectionEnc.ready = None
-                                raise AllGNFastCommands.transport.PolicyDenied({
-                                    'policy': 'allow_local_unencrypted_connections',
-                                    'addr': maddr,
-                                })
-                        else:
-                            if not self.DEPConfig.allow_unencrypted_connections:
-                                connectionEnc.ready = None
-                                raise AllGNFastCommands.transport.PolicyDenied({
-                                    'policy': 'allow_unencrypted_connections',
-                                    'addr': maddr,
-                                })
-
-                        await connectionEnc.initRaw()
-                        d = Url.ip_and_port_to_ipv6_with_port(maddr[0], maddr[1])
-                        connectionEnc.domain = d
+                        d = await self._init_unencrypted_initial_connection(connectionEnc, maddr)
 
                     while not connectionEnc.not_ready_queue.empty():
                         raw, a = connectionEnc.not_ready_queue.get_nowait()
                         await self._handle_datagram(raw, a)
                 else:
                     # Existing UDP association can still open new QUIC connections with new destination CID.
-                    # Recompute domain on every initial packet so CID -> domain stays fresh.
+                    # Recompute and, if needed, refresh encryption state on every initial packet.
+                    if encryption_type != connectionEnc.encryption_type or (
+                        encryption_type != 0 and connectionEnc.keyid != incoming_keyid
+                    ):
+                        print(
+                            f'UDP: refreshing encryption association for {maddr}; '
+                            f'old_type={connectionEnc.encryption_type}, new_type={encryption_type}, '
+                            f'old_keyid={connectionEnc.keyid}, new_keyid={incoming_keyid}'
+                        )
+
                     if encryption_type != 0:
-                        keyType = data[2]
-                        key_id = int.from_bytes(data[3:10], 'big')
-                        d = self._kdc.getDomainById(cast(Any, (keyType, key_id)))
-                        if d is None:
-                            d = connectionEnc.domain
+                        if connectionEnc.keyid != incoming_keyid or connectionEnc.encryption_type != encryption_type:
+                            d = await self._init_encrypted_initial_connection(connectionEnc, encryption_type, cast(Tuple[int, int], incoming_keyid), data, addr)
+                            if d is None:
+                                return
+                        else:
+                            d = self._kdc.getDomainById(cast(Any, incoming_keyid))
+                            if d is None:
+                                d = connectionEnc.domain
                     else:
-                        d = Url.ip_and_port_to_ipv6_with_port(maddr[0], maddr[1])
+                        if connectionEnc.encryption_type != 0:
+                            d = await self._init_unencrypted_initial_connection(connectionEnc, maddr)
+                        else:
+                            d = Url.ip_and_port_to_ipv6_with_port(maddr[0], maddr[1])
 
                     if d is not None:
                         connectionEnc.domain = d
@@ -718,6 +755,9 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
             except Exception as e:
                 print(f"UDP: UPD Decryption error: {e}")
                 print(f'info:\naddr: {addr}\n')
+                print(f'{connectionEnc.domain}')
+                print(f'{connectionEnc.keyid}')
+                print(f'{connectionEnc.eEndpoint._kdc.getKey(connectionEnc.keyid)}')
                 return
         else:
             dec = datagram
