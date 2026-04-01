@@ -169,15 +169,17 @@ class KDCObject:
                                                 payload=domain_or_keyId), keep_alive=self._active_key_synchronization)
         print('RAW: END kdc request')
 
+        rs_payload = await rs.payload
+
         if not rs.command.ok:
-            print(f'ERROR: {rs.command} {rs.payload}')
+            print(f'ERROR: {rs.command} {rs_payload}')
             raise rs
         
-        if not isinstance(rs.payload, list):
+        if not isinstance(rs_payload, list):
             print(f'command.value -> {rs.command.value}. ok: {bool(rs.command.ok)}, app: {bool(rs.command.app)}, cors: {bool(rs.command.cors)}, dns: {bool(rs.command.dns)}, dns.DomainBlocked: {bool(rs.command.dns.DomainBlocked)}, Forbidden: {bool(rs.command.Forbidden)}, app.Forbidden: {bool(rs.command.app.Forbidden)}')
-            raise AllGNFastCommands.kdc.InvalidResponseFormat(f'r.payload is not list. {type(rs.payload)} -> {rs.payload}')
+            raise AllGNFastCommands.kdc.InvalidResponseFormat(f'r.payload is not list. {type(rs_payload)} -> {rs_payload}')
 
-        return rs.payload
+        return rs_payload
 
     def getKey(self, domain_or_keyId: Union[str, Tuple[int, int]]) -> bytes:
         if isinstance(domain_or_keyId, str):

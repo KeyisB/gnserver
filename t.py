@@ -54,6 +54,7 @@ import datetime
 
 
 from gnobjects.net.objects import TempDataObject, GNRequest, GNResponse, Url
+import asyncio
 
 
 #t = TempDataObject('html', b'<html><body>Hello, World!</body></html>')
@@ -66,4 +67,9 @@ s = r.serialize()
 
 des = GNRequest.deserialize(s)
 
-print(des.payload)
+
+async def main():
+	print(await des.payload)
+
+
+asyncio.run(main())

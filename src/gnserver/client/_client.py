@@ -297,7 +297,7 @@ class AsyncClient:
                     else:
                         r = GNResponse(str(e), payload=traceback.format_exc())
 
-            logger.debug(f'Response: {request.method} {request.url} -> {r.command} {r.payload if len(str(r.payload)) < 512 else f'len({len(str(r.payload))})'}')
+            logger.debug(f'Response: {request.method} {request.url} -> {r.command}')
 
             for f in self.__response_callbacks.values():
                 asyncio.create_task(f(r))
@@ -429,12 +429,14 @@ class AsyncClient:
         if not r1.command.ok:
             raise r1
 
-        r1_data = r1.payload
+        r1_data = await r1.payload
+        if r1_data is None:
+            raise AllGNFastCommands.transport.ConnectionError('DNS payload not fully received')
 
         result = Url.ip_and_port_to_ipv6_with_port(r1_data['ip'], r1_data['port']) # type: ignore
         
 
-        self._dns_cache.set(domain, result, r1.payload.get('ttl', 60)) # type: ignore
+        self._dns_cache.set(domain, result, r1_data.get('ttl', 60)) # type: ignore
 
         return result
     
@@ -496,30 +498,34 @@ class RawQuicClient(QuicProtocolShell):
                     raise ValueError(f'Incomplete GNRequest header on closed stream {stream_id}')
                 return None
 
-            request, payload_offset, payload_present = header
+            request, payload_offset, payload_length = header
             state = {
                 'message': request,
-                'payload_present': payload_present,
-                'payload': bytearray(),
+                'header_emitted': True,
             }
 
-            if payload_present:
-                cast(bytearray, state['payload']).extend(buf[payload_offset:])
+            payload_tail = bytes(buf[payload_offset:])
+            if payload_tail:
+                request._feedIncomingPayload(payload_tail)
 
             self._buffer.pop(stream_id, None)
             self._inflight_streams[stream_id] = state
-        else:
-            if cast(bool, state['payload_present']):
-                cast(bytearray, state['payload']).extend(data)
 
-        if not end_stream:
-            return None
+            if end_stream:
+                request._finishIncomingPayload(True)
+                self._inflight_streams.pop(stream_id, None)
 
-        self._inflight_streams.pop(stream_id, None)
+            return request
+
         request = cast(GNRequest, state['message'])
-        if cast(bool, state['payload_present']):
-            request.setSerializedPayload(bytes(cast(bytearray, state['payload'])))
-        return request
+        if data:
+            request._feedIncomingPayload(data)
+
+        if end_stream:
+            request._finishIncomingPayload(True)
+            self._inflight_streams.pop(stream_id, None)
+
+        return None
 
     def _feed_incoming_response(self, stream_id: int, data: bytes, end_stream: bool) -> Optional[GNResponse]:
         state = self._inflight_streams.get(stream_id)
@@ -537,43 +543,35 @@ class RawQuicClient(QuicProtocolShell):
             response, payload_offset, payload_length = header
             trailing = bytes(buf[payload_offset:])
 
-            if payload_length is None:
-                if trailing:
-                    raise ValueError('Trailing bytes after payload-less GNResponse')
-            elif len(trailing) > payload_length:
-                raise ValueError('GNResponse payload exceeds declared size')
-
             state = {
                 'message': response,
-                'payload_length': payload_length,
-                'payload': bytearray(trailing),
+                'header_emitted': False,
             }
+
+            if trailing:
+                response._feedIncomingPayload(trailing)
 
             self._buffer.pop(stream_id, None)
             self._inflight_streams[stream_id] = state
-        else:
-            payload_length = cast(Optional[int], state['payload_length'])
-            if payload_length is None:
-                if data:
-                    raise ValueError('Unexpected bytes for payload-less GNResponse')
-            else:
-                payload = cast(bytearray, state['payload'])
-                payload.extend(data)
-                if len(payload) > payload_length:
-                    raise ValueError('GNResponse payload exceeds declared size')
 
-        if not end_stream:
-            return None
+            if end_stream:
+                response._finishIncomingPayload(True)
+                self._inflight_streams.pop(stream_id, None)
+                self._inflight.pop(stream_id, None)
 
-        self._inflight_streams.pop(stream_id, None)
+            state['header_emitted'] = True
+            return response
+
         response = cast(GNResponse, state['message'])
-        payload_length = cast(Optional[int], state['payload_length'])
-        if payload_length is not None:
-            payload = cast(bytearray, state['payload'])
-            if len(payload) != payload_length:
-                raise ValueError('Truncated GNResponse payload')
-            response.setSerializedPayload(bytes(payload))
-        return response
+        if data:
+            response._feedIncomingPayload(data)
+
+        if end_stream:
+            response._finishIncomingPayload(True)
+            self._inflight_streams.pop(stream_id, None)
+            self._inflight.pop(stream_id, None)
+
+        return None
 
     def quic_event_received(self, event: QuicEvent) -> None:
         if isinstance(event, StreamDataReceived):
@@ -611,7 +609,6 @@ class RawQuicClient(QuicProtocolShell):
                         return
                     if response is None:
                         return
-                    self._inflight.pop(event.stream_id, None)
                     if not handler.done():
                         handler.set_result(response)
                 else:
@@ -621,8 +618,11 @@ class RawQuicClient(QuicProtocolShell):
         # ─── RESET ──────────────────────────────────────────
         elif isinstance(event, StreamReset):
             handler = self._inflight.pop(event.stream_id, None)
+            state = self._inflight_streams.pop(event.stream_id, None)
+            if state is not None:
+                message = cast(Union[GNRequest, GNResponse], state['message'])
+                message._finishIncomingPayload(False)
             self._buffer.pop(event.stream_id, None)
-            self._inflight_streams.pop(event.stream_id, None)
             if handler is None:
                 return
             if isinstance(handler, asyncio.Queue):
@@ -635,6 +635,10 @@ class RawQuicClient(QuicProtocolShell):
         elif isinstance(event, ConnectionTerminated):
             if self.quicClient is None:
                 return
+
+            for state in self._inflight_streams.values():
+                message = cast(Union[GNRequest, GNResponse], state['message'])
+                message._finishIncomingPayload(False)
             
             self.stop()
             
@@ -670,16 +674,28 @@ class RawQuicClient(QuicProtocolShell):
     async def request(self, request: GNRequest, only_request: bool = False):
     
         await self._resolve_requests_transport(request)
-        blob = await self._serialize(request)
 
         sid = self._quic.get_next_available_stream_id()
 
         fut = asyncio.get_running_loop().create_future()
         if not only_request:
             self._inflight[sid] = fut
-        
-        self._quic.send_stream_data(sid, blob, end_stream=True)
+
+        header = request.serializeHeader()
+        has_payload = request.lenPayload > 0
+
+        self._quic.send_stream_data(sid, header, end_stream=not has_payload)
         self._schedule_flush()
+
+        if has_payload:
+            async for chunk in request.iterSerializedPayload():
+                self._quic.send_stream_data(sid, chunk, end_stream=False)
+                self._schedule_flush()
+
+            self._quic.send_stream_data(sid, b'', end_stream=True)
+            self._schedule_flush()
+        elif only_request:
+            return AllGNFastCommands.transport.NoResponse()
 
 
         if only_request:
@@ -692,7 +708,9 @@ class RawQuicClient(QuicProtocolShell):
         except asyncio.exceptions.TimeoutError:
             self._inflight.pop(sid, None)
             self._buffer.pop(sid, None)
-            self._inflight_streams.pop(sid, None)
+            state = self._inflight_streams.pop(sid, None)
+            if state is not None:
+                cast(Union[GNRequest, GNResponse], state['message'])._finishIncomingPayload(False)
             self._timed_out_streams.add(sid)
             if len(self._timed_out_streams) > 8192:
                 self._timed_out_streams.clear()
@@ -701,7 +719,9 @@ class RawQuicClient(QuicProtocolShell):
         except Exception:
             self._inflight.pop(sid, None)
             self._buffer.pop(sid, None)
-            self._inflight_streams.pop(sid, None)
+            state = self._inflight_streams.pop(sid, None)
+            if state is not None:
+                cast(Union[GNRequest, GNResponse], state['message'])._finishIncomingPayload(False)
             self._timed_out_streams.add(sid)
             if len(self._timed_out_streams) > 8192:
                 self._timed_out_streams.clear()
@@ -722,8 +742,7 @@ class RawQuicClient(QuicProtocolShell):
 
     async def _serialize(self, d: Union[GNRequest, GNResponse]) -> bytes:
         #TODO
-        
-        
+
         if isinstance(d, GNRequest):
             return d.serialize()
         return d.serialize()

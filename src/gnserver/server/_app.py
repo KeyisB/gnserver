@@ -455,7 +455,7 @@ class App:
 
         if allowed:
             raise AllGNFastCommands.MethodNotAllowed()
-        raise AllGNFastCommands.NotFound({'code': 3, 'message': f'Path not found: {path}: request: {request} ; payload: {request.payload}'})
+        raise AllGNFastCommands.NotFound({'code': 3, 'message': f'Path not found: {path}: request: {request}'})
 
 
   
@@ -490,30 +490,34 @@ class App:
                         raise ValueError(f'Incomplete GNRequest header on closed stream {stream_id}')
                     return None
 
-                request, payload_offset, payload_present = header
+                request, payload_offset, payload_length = header
                 state = {
                     'request': request,
-                    'payload_present': payload_present,
-                    'payload': bytearray(),
+                    'started': True,
                 }
 
-                if payload_present:
-                    cast(bytearray, state['payload']).extend(buf[payload_offset:])
+                payload_tail = bytes(buf[payload_offset:])
+                if payload_tail:
+                    request._feedIncomingPayload(payload_tail)
 
                 self._buffer.pop(stream_id, None)
                 self._streams[stream_id] = state
-            else:
-                if cast(bool, state['payload_present']):
-                    cast(bytearray, state['payload']).extend(data)
 
-            if not end_stream:
-                return None
+                if end_stream:
+                    request._finishIncomingPayload(True)
+                    self._streams.pop(stream_id, None)
 
-            self._streams.pop(stream_id, None)
+                return request
+
             request = cast(GNRequest, state['request'])
-            if cast(bool, state['payload_present']):
-                request.setSerializedPayload(bytes(cast(bytearray, state['payload'])))
-            return request
+            if data:
+                request._feedIncomingPayload(data)
+
+            if end_stream:
+                request._finishIncomingPayload(True)
+                self._streams.pop(stream_id, None)
+
+            return None
             
         def quic_event_received(self, event: QuicEvent):
             if isinstance(event, StreamDataReceived):
@@ -538,6 +542,10 @@ class App:
             logger.info(f"[DISCONNECT]  — {reason}")
 
             # release per-connection memory on disconnect
+            for state in self._streams.values():
+                request = cast(Optional[GNRequest], state.get('request'))
+                if request is not None:
+                    request._finishIncomingPayload(False)
             self._buffer.clear()
             self._streams.clear()
 
@@ -687,7 +695,7 @@ class App:
             """
             await self._resolve_dev_transport_response(response, request)
 
-            logger.debug(f'[>] [{request.client.domain}] Response: {request.method} {request.url} -> {response.command} {response.payload if len(str(response.payload)) < 256 else ''}')
+            logger.debug(f'[>] [{request.client.domain}] Response: {request.method} {request.url} -> {response.command}')
 
             if request.stream_id not in self._quic._streams:
                 logger.warning(f"Stream {request.stream_id} not found for response, skipping send")
@@ -696,15 +704,41 @@ class App:
             await self.sendRawResponse(request.stream_id, response=response, end_stream=end_stream)  # type: ignore
 
         async def sendRawResponse(self, stream_id: int, response: GNResponse, end_stream: bool = True):
-            blob = response.serialize()
-            self._quic.send_stream_data(stream_id, blob, end_stream=end_stream) # type: ignore
+            header = response.serializeHeader()
+            has_payload = response.lenPayload > 0
+
+            self._quic.send_stream_data(stream_id, header, end_stream=end_stream and not has_payload) # type: ignore
             self.transmit()
+
+            if not has_payload:
+                return
+
+            async for chunk in response.iterSerializedPayload():
+                self._quic.send_stream_data(stream_id, chunk, end_stream=False) # type: ignore
+                self.transmit()
+
+            if end_stream:
+                self._quic.send_stream_data(stream_id, b'', end_stream=True) # type: ignore
+                self.transmit()
         
         async def sendRequest(self, request: GNRequest, end_stream: bool = True):
-            blob = request.serialize()
             sid = self._quic.get_next_available_stream_id()
-            self._quic.send_stream_data(sid, blob, end_stream=end_stream)
+            header = request.serializeHeader()
+            has_payload = request.lenPayload > 0
+
+            self._quic.send_stream_data(sid, header, end_stream=end_stream and not has_payload)
             self.transmit()
+
+            if not has_payload:
+                return
+
+            async for chunk in request.iterSerializedPayload():
+                self._quic.send_stream_data(sid, chunk, end_stream=False)
+                self.transmit()
+
+            if end_stream:
+                self._quic.send_stream_data(sid, b'', end_stream=True)
+                self.transmit()
 
     def run(
         self,
