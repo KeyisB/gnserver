@@ -707,7 +707,7 @@ class App:
 
         async def sendRawResponse(self, stream_id: int, response: GNResponse, end_stream: bool = True):
             header = response.serializeHeader()
-            has_payload = response.lenPayload > 0
+            has_payload = response.payloadSize > 0
 
             self._quic.send_stream_data(stream_id, header, end_stream=end_stream and not has_payload) # type: ignore
             self.transmit()
@@ -726,7 +726,7 @@ class App:
         async def sendRequest(self, request: GNRequest, end_stream: bool = True):
             sid = self._quic.get_next_available_stream_id()
             header = request.serializeHeader()
-            has_payload = request.lenPayload > 0
+            has_payload = request.payloadSize > 0
 
             self._quic.send_stream_data(sid, header, end_stream=end_stream and not has_payload)
             self.transmit()

@@ -686,7 +686,7 @@ class RawQuicClient(QuicProtocolShell):
             self._inflight[sid] = fut
 
         header = request.serializeHeader()
-        has_payload = request.lenPayload > 0
+        has_payload = request.payloadSize > 0
 
         self._quic.send_stream_data(sid, header, end_stream=not has_payload)
         self._schedule_flush()
