@@ -487,7 +487,9 @@ class App:
                 header = GNRequest.try_deserialize_header(bytes(buf))
                 if header is None:
                     if end_stream:
-                        raise ValueError(f'Incomplete GNRequest header on closed stream {stream_id}')
+                        if len(buf) > 0:
+                            logger.warning(f'Ignoring incomplete GNRequest header on closed stream {stream_id} ({len(buf)} bytes buffered)')
+                        self._buffer.pop(stream_id, None)
                     return None
 
                 request, payload_offset, payload_length = header
