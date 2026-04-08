@@ -140,14 +140,14 @@ class KDCObject:
                 if not isinstance(a, list):
                     raise AllGNFastCommands.kdc.InvalidResponseFormat('active_key_synchronization_callback must return list')
                 
-                for i in a:
-                    if isinstance(i, bool):
-                        if i:
-                            r.append(i)
+                for i, x in enumerate(a):
+                    if isinstance(x, bool):
+                        if x:
+                            r.append(c[i])
                         else:
                             continue
                     else:
-                        out.append(i)
+                        out.append(x)
             if r:
                 res = await self._requestKDC(r)
                 out.extend(res)
