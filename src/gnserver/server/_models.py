@@ -1,17 +1,20 @@
 
-from typing import Optional, List, Callable, Union, Tuple, Coroutine
-
+from typing import Callable, Awaitable
 
 class DEPConfig:
     def __init__(self,
-                 kdc_active_key_synchronization_domain_filter: Optional[List[str]] = None,
+                 kdc_active_key_synchronization_domain_filter: list[str] | None = None,
                  allow_kdc_active_key_synchronization: bool = True,
-                 start_kdc_requested_domains: Optional[List[str]] = None,
+                 start_kdc_requested_domains: list[str] | None = None,
                  allow_unencrypted_connections: bool = False,
                  allow_local_unencrypted_connections: bool = True,
-                 start_kdc_passive_keys: Optional[List[Tuple[Tuple[int, int], str, bytes]]] = None,
-                 kdc_active_key_synchronization_callback: Optional[Callable[[List[Union[str, int]]], Union[List[Tuple[int, str, bytes]], Coroutine]]] = None,
-                 kdc_active_key_synchronization_callback_domain_filter: Optional[List[str]] = None,
+                 start_kdc_passive_keys: list[tuple[tuple[int, int], str, bytes]] | None = None,
+                 kdc_active_key_synchronization_callback: Callable[
+                                                                    [list[str | tuple[int, int]]],
+                                                                    list[tuple[tuple[int, int], str, bytes]] | list[bool]
+                                                                    | Awaitable[list[tuple[tuple[int, int], str, bytes]] | list[bool]]
+                                                                ] | None = None,
+                 kdc_active_key_synchronization_callback_domain_filter: list[str] | None = None,
                  incoming_datagram_workers: int = 1,
                  incoming_datagram_queue_size: int = 8192,
                  incoming_datagram_global_lock: bool = False,
@@ -26,9 +29,9 @@ class DEPConfig:
         
         :allow_unencrypted_connections: Разрешать незашифрованные соединения
         :allow_local_unencrypted_connections: Разрешать незашифрованные локальные соединения
-        :start_kdc_passive_keys: Ключи, которые при старте сервера будут добавлены. Формат ключа `Tuple[Tuple[key_group-int:100...255, key_id-int:8B], domain-str, key-bytes:64B]`
+        :start_kdc_passive_keys: Ключи, которые при старте сервера будут добавлены. Формат ключа `tuple[tuple[key_group-int:100...255, key_id-int:8B], domain-str, key-bytes:64B]`
 
-        :kdc_active_key_synchronization_callback: callback для установки ключей самостоятельно
+        :kdc_active_key_synchronization_callback: callback для установки ключей самостоятельно. Если return False, то синхронизация будет отключена. Если return True, то будет предпринята попытка синхронизации через KDC.
         :kdc_active_key_synchronization_callback_domainFilter: фильтр допуска к callback-у. Поддерживает *, **,  int - для всех keyId
 
         :incoming_datagram_workers: количество фиксированных workers для входящих UDP датаграмм

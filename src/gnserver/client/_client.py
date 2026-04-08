@@ -5,7 +5,7 @@ import asyncio
 import datetime
 from itertools import count
 from collections import deque
-from typing import Any, Dict, Deque, Tuple, Union, Optional, AsyncGenerator, Callable, Literal, AsyncIterable, cast, overload, Coroutine, List, TYPE_CHECKING
+from typing import Any, Awaitable, Dict, Deque, Tuple, Union, Optional, AsyncGenerator, Callable, Literal, AsyncIterable, cast, overload, Coroutine, List, TYPE_CHECKING
 from aioquic.quic.events import QuicEvent, StreamDataReceived, StreamReset, ConnectionTerminated
 from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.connection import QuicConnection
@@ -104,11 +104,11 @@ class AsyncClient:
         self._rcms_id: Optional[int] = None
 
     def init(self,
-             gn_crt: Union[bytes, str, Path],
-             requested_domains: Optional[List[str]] = None,
+             gn_crt: Union[bytes, str, Path, dict],
+             requested_domains: list[str] | None = None,
              active_key_synchronization: bool = True,
-             active_key_synchronization_callback: Optional[Callable[[List[Union[str, int]]], Union[List[Tuple[int, str, bytes]], Coroutine]]] = None,
-             active_key_synchronization_callback_domainFilter: Optional[List[str]] = None
+             active_key_synchronization_callback: Callable[[list[str | tuple[int, int]]], list[tuple[tuple[int, int], str, bytes]] | list[bool] | Awaitable[list[tuple[tuple[int, int], str, bytes]] | list[bool]]] | None = None,
+             active_key_synchronization_callback_domainFilter: list[str] | None = None
              ):
 
         if gn_crt is None:
@@ -116,7 +116,7 @@ class AsyncClient:
 
         from ..server._gnserver import GNServer as _gnserver
 
-        self._gn_crt_data = _gnserver._get_gn_server_crt(gn_crt, self._domain)
+        self._gn_crt_data = _gnserver._get_gn_server_crt(gn_crt, self._domain) if not isinstance(gn_crt, dict) else gn_crt
 
         self._kdc.init(
             self._gn_crt_data,

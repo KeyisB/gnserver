@@ -60,14 +60,14 @@ class ConnectionEncryptor:
         self.not_ready_queue = Queue()
 
         self.encryption_type: int = 0
-        self.keyid: Optional[int] = 0
-        self.domain: Optional[str] = None
+        self.keyid: tuple[int, int] = (0, 0)
+        self.domain: str | None = None
         self.processing_lock = asyncio.Lock()
         self.key_fetching = False
 
         
 
-    async def initByKeyid(self, encryption_type: int, keyid: Tuple[int, int]) -> str:
+    async def initByKeyid(self, encryption_type: int, keyid: tuple[int, int]) -> str:
         self.encryption_type = encryption_type
         self.keyid = keyid
         await self.eEndpoint._kdc.requestKeyIfNotExist(keyid)
@@ -92,23 +92,23 @@ class ConnectionEncryptor:
 
     async def initRaw(self):
         self.encryption_type = 0
-        self.keyid = 0
+        self.keyid = (0, 0)
         self.ready = True
 
     
-    async def initByDomain(self, encryption_type: int, domain: str) -> int:
+    async def initByDomain(self, encryption_type: int, domain: str) -> tuple[int, int]:
 
         self.encryption_type = encryption_type
         if encryption_type == 0:
             await self.initRaw()
-            return 0
+            return (0, 0)
 
         await self.eEndpoint._kdc.requestKeyIfNotExist(domain)
 
         self.keyid = self.eEndpoint._kdc.getKeyIdByDomain(domain)
 
         if self.keyid is None:
-            self.keyid = 0
+            self.keyid = (0, 0)
             raise AllGNFastCommands.transport.KeyIdNotFound({'domain': domain})
         
         key = self.eEndpoint._kdc.getKey(self.keyid) # type: ignore
@@ -374,7 +374,7 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
                     await self._finalize_key_and_flush(connectionEnc, encryption_type, keyid)
         except Exception as e:
             connectionEnc.ready = None
-            print(f'UDP key fetch error: {e}')
+            print(f'UDP key fetch error: {traceback.format_exc()}')
         finally:
             connectionEnc.key_fetching = False
 

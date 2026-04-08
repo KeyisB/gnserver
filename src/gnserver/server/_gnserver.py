@@ -67,7 +67,7 @@ class GNServer(App):
         self,
         domain: str,
         port: int,
-        gn_server_crt: Union[str, bytes, Path],
+        gn_server_crt: Union[str, bytes, Path, dict],
         *,
         host: str = '0.0.0.0',
         idle_timeout: float = 20.0,
@@ -82,7 +82,7 @@ class GNServer(App):
             self.setDEPConfig(dep_config)
         
 
-        gn_server_crt_ = self._get_gn_server_crt(gn_server_crt, domain)
+        gn_server_crt_ = self._get_gn_server_crt(gn_server_crt, domain) if not isinstance(gn_server_crt, dict) else gn_server_crt
 
         self.client.setDomain(domain)
         self.client.init(gn_server_crt,

@@ -1,4 +1,4 @@
-from typing import List, Optional, Dict, Union, Set, TYPE_CHECKING, Callable, Coroutine
+from typing import Awaitable, List, Optional, Dict, Union, Set, TYPE_CHECKING, Callable, Coroutine
 from gnobjects.net.objects import Url, GNRequest
 from gnobjects.net.fastcommands import AllGNFastCommands
 import inspect
@@ -27,8 +27,12 @@ class KDCObject:
              gn_crt: Optional[Union[bytes, str, Path, dict]] = None,
              requested_domains: Optional[List[str]] = None,
              active_key_synchronization: bool = True,
-             active_key_synchronization_callback: Optional[Callable[[List[Union[str, int]]], Union[List[Tuple[int, str, bytes]], Coroutine]]] = None,
-             active_key_synchronization_callback_domainFilter: Optional[List[str]] = None
+             active_key_synchronization_callback: Callable[
+                                                            [list[str | tuple[int, int]]],
+                                                            list[tuple[tuple[int, int], str, bytes]] | list[bool]
+                                                            | Awaitable[list[tuple[tuple[int, int], str, bytes]] | list[bool]]
+                                                        ] | None = None,
+             active_key_synchronization_callback_domainFilter: list[str] | None = None
              ):
         if gn_crt is None:
             gn_crt = self._client._gn_crt_data
@@ -69,8 +73,8 @@ class KDCObject:
         self._active_key_synchronization = active_key_synchronization
 
         
-        self.active_key_synchronization_callback = active_key_synchronization_callback
-        self.active_key_synchronization_callback_is_async = inspect.iscoroutinefunction(active_key_synchronization_callback)
+        self.__active_key_synchronization_callback = active_key_synchronization_callback
+        self.__active_key_synchronization_callback_is_async = inspect.iscoroutinefunction(active_key_synchronization_callback)
 
         if active_key_synchronization_callback is not None and active_key_synchronization_callback_domainFilter is not None:
             self._active_key_synchronization_df = DomainMatcherList(active_key_synchronization_callback_domainFilter)
@@ -112,7 +116,7 @@ class KDCObject:
 
         out = []
 
-        if self._active_key_synchronization_df is not None and self.active_key_synchronization_callback is not None:
+        if self._active_key_synchronization_df is not None and self.__active_key_synchronization_callback is not None:
             c = []
             r = []
             for d_or_id in domain_or_keyId:
@@ -128,13 +132,22 @@ class KDCObject:
                         c.append(d_or_id)
 
             if c:
-                if self.active_key_synchronization_callback_is_async:
-                    a = await self.active_key_synchronization_callback(c) # type: ignore
+                if self.__active_key_synchronization_callback_is_async:
+                    a = await self.__active_key_synchronization_callback(c) # type: ignore
                 else:
-                    a = self.active_key_synchronization_callback(c)
+                    a = self.__active_key_synchronization_callback(c)
+
                 if not isinstance(a, list):
                     raise AllGNFastCommands.kdc.InvalidResponseFormat('active_key_synchronization_callback must return list')
-                out.extend(a) # type: ignore
+                
+                for i in a:
+                    if isinstance(a, bool):
+                        if a:
+                            r.append(i)
+                        else:
+                            continue
+                    else:
+                        out.append(i)
             if r:
                 res = await self._requestKDC(r)
                 out.extend(res)
