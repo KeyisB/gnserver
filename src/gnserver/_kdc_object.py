@@ -141,8 +141,8 @@ class KDCObject:
                     raise AllGNFastCommands.kdc.InvalidResponseFormat('active_key_synchronization_callback must return list')
                 
                 for i in a:
-                    if isinstance(a, bool):
-                        if a:
+                    if isinstance(i, bool):
+                        if i:
                             r.append(i)
                         else:
                             continue
