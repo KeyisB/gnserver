@@ -107,7 +107,7 @@ class AsyncClient:
              gn_crt: Union[bytes, str, Path, dict],
              requested_domains: list[str] | None = None,
              active_key_synchronization: bool = True,
-             active_key_synchronization_callback: Callable[[list[str | tuple[int, int]]], list[tuple[tuple[int, int], str, bytes]] | list[bool] | Awaitable[list[tuple[tuple[int, int], str, bytes]] | list[bool]]] | None = None,
+             active_key_synchronization_callback: Callable[[list[str | tuple[int, int]]], list[tuple[tuple[int, int], str, bytes] | bool] | Awaitable[list[tuple[tuple[int, int], str, bytes] | bool]]] | None = None,
              active_key_synchronization_callback_domainFilter: list[str] | None = None
              ):
 

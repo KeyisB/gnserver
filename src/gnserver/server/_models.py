@@ -11,8 +11,8 @@ class DEPConfig:
                  start_kdc_passive_keys: list[tuple[tuple[int, int], str, bytes]] | None = None,
                  kdc_active_key_synchronization_callback: Callable[
                                                                     [list[str | tuple[int, int]]],
-                                                                    list[tuple[tuple[int, int], str, bytes]] | list[bool]
-                                                                    | Awaitable[list[tuple[tuple[int, int], str, bytes]] | list[bool]]
+                                                                    list[tuple[tuple[int, int], str, bytes] | bool]
+                                                                    | Awaitable[list[tuple[tuple[int, int], str, bytes] | bool]]
                                                                 ] | None = None,
                  kdc_active_key_synchronization_callback_domain_filter: list[str] | None = None,
                  incoming_datagram_workers: int = 1,
