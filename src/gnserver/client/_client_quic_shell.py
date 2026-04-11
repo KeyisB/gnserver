@@ -1,6 +1,7 @@
 import asyncio
 import socket
 from contextlib import asynccontextmanager
+from ipaddress import ip_address
 from typing import AsyncGenerator, Callable, Optional, cast, TYPE_CHECKING, Type
 
 from aioquic.quic.configuration import QuicConfiguration
@@ -48,7 +49,10 @@ async def connect(
     if configuration is None:
         configuration = QuicConfiguration(is_client=True)
     if configuration.server_name is None:
-        configuration.server_name = host
+        try:
+            ip_address(host)
+        except ValueError:
+            configuration.server_name = host
 
     quic = QuicConnection(configuration=configuration)
 
