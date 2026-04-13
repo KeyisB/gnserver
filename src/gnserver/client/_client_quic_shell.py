@@ -5,13 +5,14 @@ from ipaddress import ip_address
 from typing import AsyncGenerator, Callable, Optional, cast, TYPE_CHECKING, Type
 
 from aioquic.quic.configuration import QuicConfiguration
-from aioquic.quic.connection import QuicConnection, QuicTokenHandler
+from aioquic.quic.connection import QuicTokenHandler
 from aioquic.tls import SessionTicketHandler
 from aioquic.asyncio.protocol import QuicConnectionProtocol, QuicStreamHandler
 
 __all__ = ["connect"]
 
 from ..server._datagram_enc import DatagramEndpoint
+from .._gn_pq_quic import GNQuicClientSettings, GNQuicConnection
 
 
 if TYPE_CHECKING:
@@ -26,6 +27,7 @@ async def connect(
     configuration: QuicConfiguration,
     create_protocol: Type['RawQuicClient'],
     encType: int = 0,
+    gn_pq_client_settings: Optional[GNQuicClientSettings] = None,
 
     stream_handler: Optional[QuicStreamHandler] = None,
     wait_connected: bool = True,
@@ -54,7 +56,10 @@ async def connect(
         except ValueError:
             configuration.server_name = host
 
-    quic = QuicConnection(configuration=configuration)
+    quic = GNQuicConnection(
+        configuration=configuration,
+        gn_pq_client_settings=gn_pq_client_settings,
+    )
 
     # 1. Create protocol_shell (your QuicProtocolShell)
     protocol_shell = create_protocol(

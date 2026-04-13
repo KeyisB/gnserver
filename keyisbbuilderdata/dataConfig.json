@@ -5,6 +5,14 @@
         "gnobjects",
         "KeyisBTools",
         "aiofiles",
-        "uvloop"
-    ]
+        "uvloop",
+	    "pycryptodome",
+        "cryptography"
+    ],
+    "package_data": {
+        "gnserver": [
+            "oqs/bin/*.dll",
+            "oqs/bin/*.so"
+        ]
+    }
 }

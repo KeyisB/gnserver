@@ -6,7 +6,7 @@ import datetime
 from itertools import count
 from collections import deque
 from typing import Any, Awaitable, Dict, Deque, Tuple, Union, Optional, AsyncGenerator, Callable, Literal, AsyncIterable, cast, overload, Coroutine, List, TYPE_CHECKING
-from aioquic.quic.events import QuicEvent, StreamDataReceived, StreamReset, ConnectionTerminated
+from aioquic.quic.events import QuicEvent, StreamDataReceived, StreamReset, ConnectionTerminated, HandshakeCompleted
 from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.connection import QuicConnection
 from pathlib import Path
@@ -19,6 +19,7 @@ from gnobjects.net.fastcommands import AllGNFastCommands
 from gnobjects.net.domains import GNDomain
 
 from .._crt import crt_client, ml_kem_crt_client
+from .._gn_pq_quic import build_gn_pq_client_settings
 from .._kdc_object import KDCObject
 from ..server._datagram_enc import QuicProtocolShell, ConnectionEncryptor
 from ._client_quic_shell import connect
@@ -578,6 +579,10 @@ class RawQuicClient(QuicProtocolShell):
         return None
 
     def quic_event_received(self, event: QuicEvent) -> None:
+        if isinstance(event, HandshakeCompleted):
+            self._apply_gn_pq_session_root(self._QuicClient.domain)
+            return
+
         if isinstance(event, StreamDataReceived):
             if event.stream_id in self._timed_out_streams:
                 if event.end_stream:
@@ -794,7 +799,18 @@ class QuicClient:
         cfg.load_verify_locations(cadata=crt_client)
         cfg.idle_timeout = self._client._configuration.get('L5', {}).get('disconnection', {}).get('idle_timeout', 60)
 
-        encType = int(not self.domain == Url.ip_and_port_to_ipv6_with_port(ip, port))
+        target_ipv6 = Url.ip_and_port_to_ipv6_with_port(ip, port)
+        bootstrap_requires_kdc = self.domain != target_ipv6
+
+        if bootstrap_requires_kdc and self._client.server is not None:
+            if not await self._client.server.DEPConfig.isKDCAllowedForDomain(self.domain):
+                raise AllGNFastCommands.transport.PolicyDenied({
+                    'policy': 'kdc_allowed_domains',
+                    'domain': self.domain,
+                    'reason': 'KDC bootstrap disabled for domain until GN QUIC handshake key-upgrade is enabled',
+                })
+
+        encType = int(bootstrap_requires_kdc)
         if self._client._kdc.getDomainEcryptionType(self.domain) is None:
             self._client._kdc.setDomainEcryptionType(self.domain, encType)
         else:
@@ -802,6 +818,16 @@ class QuicClient:
 
         if encType != 0:
             await self._client._kdc.requestKeyIfNotExist(self.domain)
+
+        try:
+            gn_pq_kdc_key = self._client._kdc.getKey(self.domain)
+        except Exception:
+            gn_pq_kdc_key = None
+
+        gn_pq_client_settings = build_gn_pq_client_settings(
+            self.domain,
+            kdc_key=gn_pq_kdc_key,
+        )
 
         self._client_cm = connect(
             self,
@@ -811,7 +837,8 @@ class QuicClient:
             configuration=cfg,
             create_protocol=RawQuicClient,
             wait_connected=True,
-            encType=encType  # type: ignore
+            encType=encType,  # type: ignore
+            gn_pq_client_settings=gn_pq_client_settings,
         )
 
         try:

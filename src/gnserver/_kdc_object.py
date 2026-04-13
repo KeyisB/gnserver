@@ -44,28 +44,37 @@ class KDCObject:
         else:
             self._gn_crt_data = gn_crt
 
+        crypto = self._gn_crt_data.get('crypto')
+        if not isinstance(crypto, dict):
+            raise ValueError('gn_server_crt.crypto must be dict')
+
+        kdc = crypto.get('kdc')
+        if not isinstance(kdc, dict):
+            raise ValueError('gn_server_crt.crypto.kdc must be dict')
+
         self._domain: str = self._gn_crt_data['domain']
-        self._kdc_domain: str = self._gn_crt_data['kdc_domain']
-        self._kdc_domain_id = (255, self._gn_crt_data['kdc_domain_id'])
+        self._kdc_domain = kdc['domain']
+        self._kdc_domain_id = (255, kdc['self_domain_id'])
 
         self._x_domain_keyId[self._kdc_domain] = self._kdc_domain_id
-        self._x_keyId_key[self._kdc_domain_id] = self._gn_crt_data['kdc_key']
+        self._x_keyId_key[self._kdc_domain_id] = kdc['key']
 
 
-        self._second_kdc_domain: Optional[str] = self._gn_crt_data.get('second_kdc_domain')
-        self._second_kdc_domain_id: Optional[Tuple[int, int]] = (255, self._gn_crt_data['second_kdc_domain_id']) if self._gn_crt_data.get('second_kdc_domain_id') else None
+        self._second_kdc_domain = kdc.get('second_domain')
+        second_self_domain_id = kdc.get('second_self_domain_id')
+        self._second_kdc_domain_id: Optional[Tuple[int, int]] = (255, second_self_domain_id) if second_self_domain_id else None
         # 255, потому что это ключ к kdc. там не 251, даже для второго
 
         if self._second_kdc_domain is not None and self._second_kdc_domain_id is not None:
             self._x_domain_keyId[self._second_kdc_domain] = self._second_kdc_domain_id
-            self._x_keyId_key[self._second_kdc_domain_id] = self._gn_crt_data['second_kdc_key']
+            self._x_keyId_key[self._second_kdc_domain_id] = kdc['second_key']
 
         # если запросим второй kdc, а в crt только 1, то попробуем прокинуть первый как второй. Упрощение для core серверов.
         if self._second_kdc_domain is None and self._second_kdc_domain_id is None:
             self._second_kdc_domain = self._kdc_domain
             self._second_kdc_domain_id = self._kdc_domain_id
             self._x_domain_keyId[self._second_kdc_domain] = self._kdc_domain_id
-            self._x_keyId_key[self._second_kdc_domain_id] = self._gn_crt_data['kdc_key']
+            self._x_keyId_key[self._second_kdc_domain_id] = kdc['key']
 
 
 

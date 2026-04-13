@@ -9,6 +9,7 @@ from KeyisBTools.cryptography import m1
 from gnobjects.net.objects import Url
 
 from ._app import App, GNRequest
+from .._gn_pq_quic import extract_gn_pq_server_settings
 from ._models import DEPConfig
 
 
@@ -83,14 +84,15 @@ class GNServer(App):
         
 
         gn_server_crt_ = self._get_gn_server_crt(gn_server_crt, domain) if not isinstance(gn_server_crt, dict) else gn_server_crt
+        self._gn_pq_server_settings = extract_gn_pq_server_settings(gn_server_crt_)
 
         self.client.setDomain(domain)
-        self.client.init(gn_server_crt,
-                         requested_domains=self.DEPConfig.start_kdc_requested_domains,
-                         active_key_synchronization=self.DEPConfig.allow_kdc_active_key_synchronization,
-                         active_key_synchronization_callback=self.DEPConfig.kdc_active_key_synchronization_callback,
-                         active_key_synchronization_callback_domainFilter=self.DEPConfig.kdc_active_key_synchronization_callback_domain_filter
-                         )
+        self.client.init(gn_server_crt_,
+                        requested_domains=self.DEPConfig.start_kdc_requested_domains,
+                        active_key_synchronization=self.DEPConfig.allow_kdc_active_key_synchronization,
+                        active_key_synchronization_callback=self.DEPConfig.kdc_active_key_synchronization_callback,
+                        active_key_synchronization_callback_domainFilter=self.DEPConfig.kdc_active_key_synchronization_callback_domain_filter
+                        )
 
 
         @self.addEventListener('start', move_to_start=True) # type: ignore
@@ -98,12 +100,18 @@ class GNServer(App):
             await self.client._kdc.addServers(servers_keys=self.DEPConfig.start_kdc_passive_keys) # type: ignore
 
 
-        if 'tls_certfile' in gn_server_crt_ and 'tls_keyfile' in gn_server_crt_:
-            tls_certfile = gn_server_crt_['tls_certfile']
-            tls_keyfile = gn_server_crt_['tls_keyfile']
-        else:
-            tls_certfile = None
-            tls_keyfile = None
+        crypto = gn_server_crt_.get('crypto')
+        if not isinstance(crypto, dict):
+            raise ValueError('gn_server_crt.crypto must be dict')
+
+        tls = crypto.get('tls')
+        if not isinstance(tls, dict):
+            raise ValueError('gn_server_crt.crypto.tls must be dict')
+
+        tls_certfile = tls.get('crt')
+        tls_keyfile = tls.get('key')
+        if tls_certfile is None or tls_keyfile is None:
+            raise ValueError('gn_server_crt.crypto.tls must include crt and key')
 
 
 

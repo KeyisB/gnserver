@@ -13,6 +13,7 @@ import ctypes as ct  # to call native
 import ctypes.util as ctu
 import importlib.metadata  # to determine module version at runtime
 import logging
+import os
 import platform  # to learn the OS we're on
 import subprocess
 import tempfile  # to install liboqs on demand
@@ -21,7 +22,7 @@ import time
 try:
     import tomllib  # Python 3.11+
 except ImportError:  # Fallback for older versions
-    import tomli as tomllib
+    tomllib = None  # type: ignore[assignment]
 import warnings
 from os import environ
 from pathlib import Path
@@ -46,11 +47,48 @@ TStatefulSignature = TypeVar("TStatefulSignature", bound="StatefulSignature")
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
-logger.addHandler(logging.StreamHandler(stdout))
+if not logger.handlers:
+    logger.addHandler(logging.StreamHandler(stdout))
 
 # Expected return value from native OQS functions
 OQS_SUCCESS: Final[int] = 0
 OQS_ERROR: Final[int] = -1
+
+_KEM_ALIASES: Final[dict[str, str]] = {
+    "kyber512": "ML-KEM-512",
+    "kyber768": "ML-KEM-768",
+    "kyber1024": "ML-KEM-1024",
+}
+
+_SIG_ALIASES: Final[dict[str, str]] = {
+    "dilithium2": "ML-DSA-44",
+    "dilithium3": "ML-DSA-65",
+    "dilithium5": "ML-DSA-87",
+}
+
+
+def _resolve_alias(alg_name: str, aliases: dict[str, str]) -> str:
+    return aliases.get(alg_name.casefold(), alg_name)
+
+
+def _normalize_kem_name(alg_name: str) -> str:
+    return _resolve_alias(alg_name, _KEM_ALIASES)
+
+
+def _normalize_sig_name(alg_name: str) -> str:
+    return _resolve_alias(alg_name, _SIG_ALIASES)
+
+
+_WINDOWS_DLL_DIRECTORIES: list[Any] = []
+
+
+def _find_local_pyproject() -> Optional[Path]:
+    current = Path(__file__).resolve()
+    for parent in current.parents:
+        candidate = parent / "pyproject.toml"
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def oqs_python_version() -> Union[str, None]:
@@ -58,20 +96,19 @@ def oqs_python_version() -> Union[str, None]:
     try:
         result = importlib.metadata.version("liboqs-python")
     except importlib.metadata.PackageNotFoundError:
-        warnings.warn("Please install liboqs-python using pip install", stacklevel=2)
-        pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
+        pyproject = _find_local_pyproject()
+        if pyproject is None:
+            return None
         try:
             # Fallback to version specified in pyproject.toml when running from the
             # source tree. This allows workflows to use the correct liboqs version
             # before the package is installed.
+            if tomllib is None:
+                return None
             with pyproject.open("rb") as f:
                 data = tomllib.load(f)
             return data["project"]["version"]
         except (FileNotFoundError, KeyError, tomllib.TOMLDecodeError):
-            warnings.warn(
-                "Please install liboqs-python using pip install",
-                stacklevel=2,
-            )
             return None
     return result
 
@@ -102,16 +139,15 @@ def _load_shared_obj(
     # Search additional path, if any
     if additional_searching_paths:
         for path in additional_searching_paths:
+            if path.is_file():
+                paths.append(path.absolute())
+                continue
             if platform.system() == "Darwin":
                 paths.append(path.absolute() / Path(f"lib{name}").with_suffix(".dylib"))
             elif platform.system() == "Windows":
                 paths.append(path.absolute() / Path(name).with_suffix(".dll"))
-                # Does not work
-                # os.environ["PATH"] += os.path.abspath(path)
             else:  # Linux/FreeBSD/UNIX
                 paths.append(path.absolute() / Path(f"lib{name}").with_suffix(".so"))
-                # https://stackoverflow.com/questions/856116/changing-ld-library-path-at-runtime-for-ctypes
-                # os.environ["LD_LIBRARY_PATH"] += os.path.abspath(path)
 
     # Search typical locations
     try:
@@ -127,8 +163,10 @@ def _load_shared_obj(
         pass
 
     for path in paths:
-        if path:
+        if path and path.exists():
             try:
+                if platform.system() == "Windows" and hasattr(os, "add_dll_directory"):
+                    _WINDOWS_DLL_DIRECTORIES.append(os.add_dll_directory(str(path.parent)))
                 lib: ct.CDLL = dll.LoadLibrary(str(path))
             except OSError:
                 pass
@@ -152,7 +190,7 @@ def _install_liboqs(
     oqs_version_to_install: Union[str, None] = None,
 ) -> None:
     """Install liboqs version oqs_version (if None, installs latest at HEAD) in the target_directory."""  # noqa: E501
-    if "rc" in oqs_version_to_install:
+    if oqs_version_to_install and "rc" in oqs_version_to_install:
         # removed the "-" from the version string
         tmp = oqs_version_to_install.split("rc")
         oqs_version_to_install = tmp[0] + "-rc" + tmp[1]
@@ -221,6 +259,9 @@ def _install_liboqs(
 
 
 def _load_liboqs() -> ct.CDLL:
+    module_dir = Path(__file__).resolve().parent
+    bundled_paths = [module_dir / "bin", module_dir]
+
     if "OQS_INSTALL_PATH" in environ:
         oqs_install_dir = Path(environ["OQS_INSTALL_PATH"])
     else:
@@ -239,7 +280,7 @@ def _load_liboqs() -> ct.CDLL:
     try:
         liboqs = _load_shared_obj(
             name="oqs",
-            additional_searching_paths=[oqs_lib_dir, oqs_lib64_dir],
+            additional_searching_paths=[*bundled_paths, oqs_lib_dir, oqs_lib64_dir],
         )
         assert liboqs  # noqa: S101
     except RuntimeError:
@@ -249,7 +290,7 @@ def _load_liboqs() -> ct.CDLL:
         try:
             liboqs = _load_shared_obj(
                 name="oqs",
-                additional_searching_paths=[oqs_lib_dir],
+                additional_searching_paths=[*bundled_paths, oqs_lib_dir, oqs_lib64_dir],
             )
             assert liboqs  # noqa: S101
         except RuntimeError:
@@ -372,6 +413,7 @@ class KeyEncapsulation(ct.Structure):
         :param secret_key: optional if generating by generate_keypair() later.
         """
         super().__init__()
+        alg_name = _normalize_kem_name(alg_name)
         self.alg_name = alg_name
         if alg_name not in _enabled_KEMs:
             # perhaps it's a supported but not enabled alg
@@ -549,6 +591,7 @@ def is_kem_enabled(alg_name: str) -> bool:
 
     :param alg_name: a KEM mechanism algorithm name.
     """
+    alg_name = _normalize_kem_name(alg_name)
     return native().OQS_KEM_alg_is_enabled(ct.create_string_buffer(alg_name.encode()))
 
 
@@ -612,6 +655,8 @@ class Signature(ct.Structure):
         :param secret_key: optional, if generated by generate_keypair().
         """
         super().__init__()
+        alg_name = _normalize_sig_name(alg_name)
+        self.alg_name = alg_name
         if alg_name not in _enabled_sigs:
             # perhaps it's a supported but not enabled alg
             if alg_name in _supported_sigs:
@@ -850,6 +895,7 @@ def is_sig_enabled(alg_name: str) -> bool:
 
     :param alg_name: A signature mechanism algorithm name.
     """
+    alg_name = _normalize_sig_name(alg_name)
     return native().OQS_SIG_alg_is_enabled(ct.create_string_buffer(alg_name.encode()))
 
 
@@ -859,6 +905,7 @@ def sig_supports_context(alg_name: str) -> bool:
 
     :param alg_name: A signature mechanism algorithm name.
     """
+    alg_name = _normalize_sig_name(alg_name)
     return bool(native().OQS_SIG_supports_ctx_str(ct.create_string_buffer(alg_name.encode())))
 
 

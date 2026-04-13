@@ -16,6 +16,7 @@ from typing import Any, AsyncGenerator, Union
 from aioquic.quic.events import (
     QuicEvent,
     ConnectionTerminated,
+    HandshakeCompleted,
     StreamDataReceived,
 )
 from pathlib import Path
@@ -34,6 +35,7 @@ from ._func_params_validation import register_schema_by_key, validate_params_by_
 from ._cors_resolver import resolve_cors
 from ._routes import Route, _compile_path, _ensure_async, _convert_value
 from ..client._client import AsyncClient
+from .._gn_pq_quic import GNQuicServer
 
 from ._datagram_enc import QuicProtocolShell, DatagramEndpoint
 
@@ -522,7 +524,11 @@ class App:
             return None
             
         def quic_event_received(self, event: QuicEvent):
-            if isinstance(event, StreamDataReceived):
+            if isinstance(event, HandshakeCompleted):
+                self._refresh_domain()
+                self._apply_gn_pq_session_root(self._domain)
+
+            elif isinstance(event, StreamDataReceived):
                 request = self._feed_request_stream(event.stream_id, event.data, event.end_stream)
                 if request is not None:
                     asyncio.create_task(self._resolve_request(event.stream_id, request))
@@ -832,9 +838,10 @@ class App:
                 def proto_factory(*a, **kw):
                     return App._ServerProto(*a, api=self, datagramEndpoint=self._datagramEndpoint, **kw)
 
-                quic_server = QuicServer(
+                quic_server = GNQuicServer(
                     configuration=cfg,
                     create_protocol=proto_factory,
+                    gn_pq_server_settings=getattr(self, '_gn_pq_server_settings', None),
                 )
 
                 self._datagramEndpoint = DatagramEndpoint(quic_server, self.client._kdc, dEPConfig=self.DEPConfig)

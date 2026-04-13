@@ -26,6 +26,7 @@ from gnobjects.net.fastcommands import AllGNFastCommands
 from gnobjects.net.tools import DomainMatcherList
 from gnobjects.net.domains import GNDomain
 
+from .._gn_pq_session import derive_transport_keys_from_root64
 from ._models import DEPConfig
 
 NEW_SIZE = 1191
@@ -62,14 +63,35 @@ class ConnectionEncryptor:
         self.encryption_type: int = 0
         self.keyid: tuple[int, int] = (0, 0)
         self.domain: str | None = None
+        self._session_root64: Optional[bytes] = None
         self.processing_lock = asyncio.Lock()
         self.key_fetching = False
 
-        
+    def _set_transport_keys(self, key_in: bytes, key_out: bytes) -> None:
+        if len(key_in) != 32 or len(key_out) != 32:
+            raise ValueError('Transport keys must be 32 bytes each')
+
+        self._key_in = key_in
+        self._key_out = key_out
+
+    def getSessionRoot64(self) -> Optional[bytes]:
+        return self._session_root64
+
+    def setSessionRoot64(self, root64: bytes, peer_domain: str) -> None:
+        self_domain = self.eEndpoint._kdc._client._domain
+        key_in, key_out = derive_transport_keys_from_root64(
+            root64,
+            local_domain=self_domain,
+            peer_domain=peer_domain,
+        )
+        self._set_transport_keys(key_in, key_out)
+        self._session_root64 = root64
+
 
     async def initByKeyid(self, encryption_type: int, keyid: tuple[int, int]) -> str:
         self.encryption_type = encryption_type
         self.keyid = keyid
+        self._session_root64 = None
         await self.eEndpoint._kdc.requestKeyIfNotExist(keyid)
 
         key = self.eEndpoint._kdc.getKey(keyid)
@@ -83,8 +105,9 @@ class ConnectionEncryptor:
         
         
         
-        self._key_in = HKDF(algorithm=hashes.SHA3_512(), length=32, salt=DestDomain.encode() + self_domain.encode(), info=b'gn:DgEncryptor').derive(key)
-        self._key_out = HKDF(algorithm=hashes.SHA3_512(), length=32, salt=self_domain.encode() + DestDomain.encode(), info=b'gn:DgEncryptor').derive(key)
+        key_in = HKDF(algorithm=hashes.SHA3_512(), length=32, salt=DestDomain.encode() + self_domain.encode(), info=b'gn:DgEncryptor').derive(key)
+        key_out = HKDF(algorithm=hashes.SHA3_512(), length=32, salt=self_domain.encode() + DestDomain.encode(), info=b'gn:DgEncryptor').derive(key)
+        self._set_transport_keys(key_in, key_out)
 
         self.ready = True
         self.domain = DestDomain
@@ -93,12 +116,14 @@ class ConnectionEncryptor:
     async def initRaw(self):
         self.encryption_type = 0
         self.keyid = (0, 0)
+        self._session_root64 = None
         self.ready = True
 
     
     async def initByDomain(self, encryption_type: int, domain: str) -> tuple[int, int]:
 
         self.encryption_type = encryption_type
+        self._session_root64 = None
         if encryption_type == 0:
             await self.initRaw()
             return (0, 0)
@@ -115,8 +140,9 @@ class ConnectionEncryptor:
 
         self_domain = self.eEndpoint._kdc._client._domain
         
-        self._key_in = HKDF(algorithm=hashes.SHA3_512(), length=32, salt=domain.encode() + self_domain.encode(), info=b'gn:DgEncryptor').derive(key)
-        self._key_out = HKDF(algorithm=hashes.SHA3_512(), length=32, salt=self_domain.encode() + domain.encode(), info=b'gn:DgEncryptor').derive(key)
+        key_in = HKDF(algorithm=hashes.SHA3_512(), length=32, salt=domain.encode() + self_domain.encode(), info=b'gn:DgEncryptor').derive(key)
+        key_out = HKDF(algorithm=hashes.SHA3_512(), length=32, salt=self_domain.encode() + domain.encode(), info=b'gn:DgEncryptor').derive(key)
+        self._set_transport_keys(key_in, key_out)
 
         self.ready = True
         self.domain = domain
@@ -179,6 +205,34 @@ class QuicProtocolShell(QuicConnectionProtocol):
 
     def setDefault_max_datagram_size(self):
         self._quic._max_datagram_size = self._upd_datagram_size
+
+    def _apply_gn_pq_session_root(self, peer_domain: Optional[str]) -> bool:
+        if not peer_domain:
+            return False
+
+        established = getattr(self._quic, "gn_pq_established_state", None)
+        if established is None:
+            return False
+
+        network_paths = getattr(self._quic, "_network_paths", None)
+        if not network_paths:
+            return False
+
+        addr = network_paths[0].addr
+        maddr = DatagramEndpoint.from_addr_to_maddr(addr)
+        connectionEnc = self.datagramEndpoint.getDgEnc(maddr)
+
+        # Mid-connection upgrade from raw UDP framing would need an explicit epoch switch.
+        # Only rekey already-encrypted pre-QUIC associations here.
+        if connectionEnc.encryption_type == 0:
+            return False
+
+        if connectionEnc.getSessionRoot64() == established.root64:
+            return True
+
+        connectionEnc.setSessionRoot64(established.root64, peer_domain)
+        connectionEnc.domain = peer_domain
+        return True
 
 
     def callback_domain(self, domain: Optional[str]): ...
@@ -292,6 +346,11 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
             if a is not None:
                 self.active_key_synchronization_callback_domain_filter = DomainMatcherList(a)
                 del a
+
+    async def _is_kdc_bootstrap_allowed_for_local_domain(self) -> bool:
+        if self._domain is None:
+            return True
+        return await self.DEPConfig.isKDCAllowedForDomain(self._domain)
     
     def add_QuicProtocolShellServer_domain(self, data: bytes, domain: str):
         h = pull_quic_header(Buffer(data=data))
@@ -314,6 +373,13 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
         data: bytes,
         addr,
     ) -> Optional[str]:
+        if not await self._is_kdc_bootstrap_allowed_for_local_domain():
+            connectionEnc.ready = None
+            raise AllGNFastCommands.transport.PolicyDenied({
+                'policy': 'kdc_allowed_domains',
+                'domain': self._domain,
+            })
+
         if not self._kdc._active_key_synchronization:
             key = self._kdc.getKey(keyid)
             if key is None:
@@ -714,8 +780,11 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
                 else:
                     # Existing UDP association can still open new QUIC connections with new destination CID.
                     # Recompute and, if needed, refresh encryption state on every initial packet.
-                    if encryption_type != connectionEnc.encryption_type or (
-                        encryption_type != 0 and connectionEnc.keyid != incoming_keyid
+                    # This also clears any GN PQ session rekey that belonged to an earlier QUIC connection.
+                    if (
+                        connectionEnc.getSessionRoot64() is not None
+                        or encryption_type != connectionEnc.encryption_type
+                        or (encryption_type != 0 and connectionEnc.keyid != incoming_keyid)
                     ):
                         print(
                             f'UDP: refreshing encryption association for {maddr}; '

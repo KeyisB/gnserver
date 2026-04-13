@@ -1,10 +1,15 @@
 
+import inspect
 from typing import Callable, Awaitable
+
+from gnobjects.net.tools import DomainMatcherList
 
 class DEPConfig:
     def __init__(self,
                  kdc_active_key_synchronization_domain_filter: list[str] | None = None,
                  allow_kdc_active_key_synchronization: bool = True,
+                 kdc_allowed_domains: list[str] | None = None,
+                 kdc_allowed_domains_callback: Callable[[str], bool | Awaitable[bool]] | None = None,
                  start_kdc_requested_domains: list[str] | None = None,
                  allow_unencrypted_connections: bool = False,
                  allow_local_unencrypted_connections: bool = True,
@@ -25,6 +30,8 @@ class DEPConfig:
 
         :kdc_active_key_synchronization_domain_filter: Фильтр доменов допущенных к активной синхронизации. Поддерживает *, **
         :allow_kdc_active_key_synchronization: Активная синхронизация ключей с установленым KDC. Если с сервером было установлено новое соеденение, ключи к корому не были найдены, они будут запрошены у сервера KDC
+        :kdc_allowed_domains: Фильтр доменов, для которых вообще разрешен bootstrap через KDC. По умолчанию `None` = KDC разрешен для всех доменов.
+        :kdc_allowed_domains_callback: Дополнительная sync/async policy-проверка домена для bootstrap через KDC. Если возвращает False, bootstrap через KDC запрещен.
         :start_kdc_requested_domains: Домены, ключи для которых будут запрошену у KDC при старте сервера
         
         :allow_unencrypted_connections: Разрешать незашифрованные соединения
@@ -41,6 +48,8 @@ class DEPConfig:
         """
         self.kdc_active_key_synchronization_domain_filter = kdc_active_key_synchronization_domain_filter
         self.allow_kdc_active_key_synchronization = allow_kdc_active_key_synchronization
+        self.kdc_allowed_domains = list(kdc_allowed_domains) if kdc_allowed_domains is not None else None
+        self.kdc_allowed_domains_callback = kdc_allowed_domains_callback
         self.start_kdc_requested_domains = list(start_kdc_requested_domains or [])
         self.allow_unencrypted_connections = allow_unencrypted_connections
         self.allow_local_unencrypted_connections = allow_local_unencrypted_connections
@@ -50,6 +59,22 @@ class DEPConfig:
         self.incoming_datagram_workers = max(1, int(incoming_datagram_workers or 1))
         self.incoming_datagram_queue_size = max(1, int(incoming_datagram_queue_size or 1))
         self.incoming_datagram_global_lock = bool(incoming_datagram_global_lock)
+
+        self._kdc_allowed_domains_matcher = DomainMatcherList(self.kdc_allowed_domains) if self.kdc_allowed_domains is not None else None
+
+    async def isKDCAllowedForDomain(self, domain: str) -> bool:
+        allowed = True
+
+        if self._kdc_allowed_domains_matcher is not None:
+            allowed = self._kdc_allowed_domains_matcher.match_any(domain)
+
+        if allowed and self.kdc_allowed_domains_callback is not None:
+            callback_result = self.kdc_allowed_domains_callback(domain)
+            if inspect.isawaitable(callback_result):
+                callback_result = await callback_result
+            allowed = bool(callback_result)
+
+        return allowed
   
 
 
