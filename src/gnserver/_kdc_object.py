@@ -1,3 +1,5 @@
+from collections import OrderedDict
+from dataclasses import dataclass
 from typing import Awaitable, List, Optional, Dict, Union, Set, TYPE_CHECKING, Callable, Coroutine
 from gnobjects.net.objects import Url, GNRequest
 from gnobjects.net.fastcommands import AllGNFastCommands
@@ -10,6 +12,14 @@ from gnobjects.net.tools import DomainMatcherList
 if TYPE_CHECKING:
     from .client._client import AsyncClient
 
+
+@dataclass(slots=True)
+class InactiveTransportSession:
+    domain: str
+    keyid: Tuple[int, int]
+    encryption_type: int
+    root64: bytes
+
 class KDCObject:
     def __init__(self, client: 'AsyncClient'):
      
@@ -20,6 +30,8 @@ class KDCObject:
 
         self._encryption_type: Dict[Union[str, int], int] = {}
         self._domain_hkdf_cache: Dict[Tuple[int, str], bytes] = {}
+        self._inactive_transport_sessions: OrderedDict[str, InactiveTransportSession] = OrderedDict()
+        self._inactive_transport_sessions_keyid_domain: Dict[Tuple[int, int], str] = {}
 
         self.second_kdc_domains_patterns: Optional[DomainMatcherList] = None
 
@@ -225,6 +237,73 @@ class KDCObject:
         else:
             if domain_or_keyId not in self._x_keyId_key:
                 await self.requestKDC(domain_or_keyId)
+
+    def rememberInactiveTransportSession(
+        self,
+        *,
+        domain: str,
+        keyid: Tuple[int, int],
+        encryption_type: int,
+        root64: bytes,
+        max_sessions: int = 8192,
+    ) -> None:
+        if not domain or encryption_type == 0 or len(root64) != 64:
+            return
+
+        existing = self._inactive_transport_sessions.pop(domain, None)
+        if existing is not None:
+            self._inactive_transport_sessions_keyid_domain.pop(existing.keyid, None)
+
+        previous_domain = self._inactive_transport_sessions_keyid_domain.pop(keyid, None)
+        if previous_domain is not None and previous_domain != domain:
+            self._inactive_transport_sessions.pop(previous_domain, None)
+
+        session = InactiveTransportSession(
+            domain=domain,
+            keyid=keyid,
+            encryption_type=encryption_type,
+            root64=root64,
+        )
+        self._inactive_transport_sessions[domain] = session
+        self._inactive_transport_sessions_keyid_domain[keyid] = domain
+
+        limit = max(1, int(max_sessions or 1))
+        while len(self._inactive_transport_sessions) > limit:
+            expired_domain, expired_session = self._inactive_transport_sessions.popitem(last=False)
+            if self._inactive_transport_sessions_keyid_domain.get(expired_session.keyid) == expired_domain:
+                self._inactive_transport_sessions_keyid_domain.pop(expired_session.keyid, None)
+
+    def getInactiveTransportSessionByDomain(self, domain: str) -> Optional[InactiveTransportSession]:
+        session = self._inactive_transport_sessions.get(domain)
+        if session is None:
+            return None
+
+        self._inactive_transport_sessions.move_to_end(domain)
+        return session
+
+    def getInactiveTransportSessionByKeyId(self, keyid: Tuple[int, int]) -> Optional[InactiveTransportSession]:
+        domain = self._inactive_transport_sessions_keyid_domain.get(keyid)
+        if domain is None:
+            return None
+
+        session = self._inactive_transport_sessions.get(domain)
+        if session is None:
+            self._inactive_transport_sessions_keyid_domain.pop(keyid, None)
+            return None
+
+        self._inactive_transport_sessions.move_to_end(domain)
+        return session
+
+    def deleteInactiveTransportSession(self, domain_or_keyid: Union[str, Tuple[int, int]]) -> None:
+        if isinstance(domain_or_keyid, str):
+            session = self._inactive_transport_sessions.pop(domain_or_keyid, None)
+            if session is not None and self._inactive_transport_sessions_keyid_domain.get(session.keyid) == domain_or_keyid:
+                self._inactive_transport_sessions_keyid_domain.pop(session.keyid, None)
+            return
+
+        domain = self._inactive_transport_sessions_keyid_domain.pop(domain_or_keyid, None)
+        if domain is not None:
+            self._inactive_transport_sessions.pop(domain, None)
     
     def deleteKeyByDomain(self, domain: str) -> None:
         keyid = self._x_domain_keyId.pop(domain, None)

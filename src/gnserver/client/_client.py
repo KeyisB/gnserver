@@ -17,7 +17,6 @@ from KeyisBTools import TTLDict
 from gnobjects.net.objects import GNRequest, GNResponse, Url
 from gnobjects.net.fastcommands import AllGNFastCommands
 from gnobjects.net.domains import GNDomain
-
 from .._crt import crt_client, ml_kem_crt_client
 from .._gn_pq_quic import build_gn_pq_client_settings
 from .._kdc_object import KDCObject
@@ -834,8 +833,13 @@ class QuicClient:
         except Exception:
             gn_pq_kdc_key = None
 
+        resume_inactive_transport_session = (
+            bootstrap_requires_kdc
+            and self._client._kdc.getInactiveTransportSessionByDomain(self.domain) is not None
+        )
+
         gn_pq_client_settings = None
-        if bootstrap_requires_kdc:
+        if bootstrap_requires_kdc and not resume_inactive_transport_session:
             gn_pq_client_settings = build_gn_pq_client_settings(
                 self.domain,
                 kdc_key=gn_pq_kdc_key,
@@ -879,6 +883,11 @@ class QuicClient:
         self.status = 'disconnect'
         
         if self._quik_core is not None:
+            try:
+                self._quik_core.datagramEndpoint.markProtocolInactive(self._quik_core)
+            except Exception:
+                pass
+
             self._quik_core.stop()
         
 

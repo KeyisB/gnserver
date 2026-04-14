@@ -70,9 +70,11 @@ async def connect(
     )
 
     # 2. Create DatagramEndpoint (now protocol exists)
+    dep_config = quicClient._client.server.DEPConfig if quicClient._client.server is not None else None
     datagramEndpoint = DatagramEndpoint(
         quic_routing=protocol_shell,
-        kdc=quicClient._client._kdc
+        kdc=quicClient._client._kdc,
+        dEPConfig=dep_config,
     )
 
     datagramEndpoint._domain = domain

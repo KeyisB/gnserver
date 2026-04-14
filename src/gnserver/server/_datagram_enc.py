@@ -87,6 +87,20 @@ class ConnectionEncryptor:
         self._set_transport_keys(key_in, key_out)
         self._session_root64 = root64
 
+    def restoreInactiveSession(
+        self,
+        *,
+        encryption_type: int,
+        keyid: tuple[int, int],
+        root64: bytes,
+        peer_domain: str,
+    ) -> None:
+        self.encryption_type = encryption_type
+        self.keyid = keyid
+        self.domain = peer_domain
+        self.ready = True
+        self.setSessionRoot64(root64, peer_domain)
+
 
     async def initByKeyid(self, encryption_type: int, keyid: tuple[int, int]) -> str:
         self.encryption_type = encryption_type
@@ -364,6 +378,76 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
 
     def dropProtocolState(self, proto: QuicProtocolShell):
         self.x_cid_domain.pop(proto._quic.original_destination_connection_id, None)
+
+    def _inactive_transport_session_limit(self) -> int:
+        return max(1, int(getattr(self.DEPConfig, 'max_inactive_transport_sessions', 8192) or 1))
+
+    def _remember_inactive_connection(self, connectionEnc: ConnectionEncryptor) -> None:
+        root64 = connectionEnc.getSessionRoot64()
+        if root64 is None or connectionEnc.domain is None or connectionEnc.encryption_type == 0:
+            return
+
+        self._kdc.rememberInactiveTransportSession(
+            domain=connectionEnc.domain,
+            keyid=connectionEnc.keyid,
+            encryption_type=connectionEnc.encryption_type,
+            root64=root64,
+            max_sessions=self._inactive_transport_session_limit(),
+        )
+
+    def _restore_connection_from_inactive_domain(self, connectionEnc: ConnectionEncryptor, domain: str) -> bool:
+        session = self._kdc.getInactiveTransportSessionByDomain(domain)
+        if session is None:
+            return False
+
+        connectionEnc.restoreInactiveSession(
+            encryption_type=session.encryption_type,
+            keyid=session.keyid,
+            root64=session.root64,
+            peer_domain=session.domain,
+        )
+        return True
+
+    def _restore_connection_from_inactive_keyid(self, connectionEnc: ConnectionEncryptor, keyid: Tuple[int, int]) -> bool:
+        session = self._kdc.getInactiveTransportSessionByKeyId(keyid)
+        if session is None:
+            return False
+
+        connectionEnc.restoreInactiveSession(
+            encryption_type=session.encryption_type,
+            keyid=session.keyid,
+            root64=session.root64,
+            peer_domain=session.domain,
+        )
+        return True
+
+    def getPeerKdcKey(self, proto: QuicProtocolShell) -> Optional[bytes]:
+        local_domain = self._kdc._client._domain
+        if local_domain not in (self._kdc._kdc_domain, self._kdc._second_kdc_domain):
+            return None
+
+        network_paths = getattr(proto._quic, '_network_paths', None)
+        if not network_paths:
+            return None
+
+        maddr = self.from_addr_to_maddr(network_paths[0].addr)
+        connectionEnc = self.x_maddr_dgEnc.get(maddr)
+        if connectionEnc is None or connectionEnc.keyid == (0, 0):
+            return None
+
+        return self._kdc.getKey(connectionEnc.keyid)
+
+    def markProtocolInactive(self, proto: QuicProtocolShell) -> None:
+        network_paths = getattr(proto._quic, '_network_paths', None)
+        if not network_paths:
+            return
+
+        maddr = self.from_addr_to_maddr(network_paths[0].addr)
+        connectionEnc = self.x_maddr_dgEnc.pop(maddr, None)
+        if connectionEnc is None:
+            return
+
+        self._remember_inactive_connection(connectionEnc)
 
     async def _init_encrypted_initial_connection(
         self,
@@ -709,7 +793,14 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
 
     async def async_sendto(self, connectionEnc: 'ConnectionEncryptor', data: bytes, addr):
         if not connectionEnc.ready:
-            keyid = await connectionEnc.initByDomain(self._default_encryption_type, cast(str, self._domain))
+            restored = False
+            if self._default_encryption_type != 0 and self._domain is not None:
+                restored = self._restore_connection_from_inactive_domain(connectionEnc, cast(str, self._domain))
+
+            if restored:
+                keyid = connectionEnc.keyid
+            else:
+                keyid = await connectionEnc.initByDomain(self._default_encryption_type, cast(str, self._domain))
         else:
             keyid = connectionEnc.keyid
 
@@ -767,9 +858,13 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
 
                 if not connectionEnc.ready:
                     if encryption_type != 0: # encrypted
-                        d = await self._init_encrypted_initial_connection(connectionEnc, encryption_type, cast(Tuple[int, int], incoming_keyid), data, addr)
-                        if d is None:
-                            return
+                        restored = self._restore_connection_from_inactive_keyid(connectionEnc, cast(Tuple[int, int], incoming_keyid))
+                        if restored:
+                            d = connectionEnc.domain
+                        else:
+                            d = await self._init_encrypted_initial_connection(connectionEnc, encryption_type, cast(Tuple[int, int], incoming_keyid), data, addr)
+                            if d is None:
+                                return
 
                     else:
                         d = await self._init_unencrypted_initial_connection(connectionEnc, maddr)
@@ -779,24 +874,18 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
                         await self._handle_datagram(raw, a)
                 else:
                     # Existing UDP association can still open new QUIC connections with new destination CID.
-                    # Recompute and, if needed, refresh encryption state on every initial packet.
-                    # This also clears any GN PQ session rekey that belonged to an earlier QUIC connection.
-                    if (
-                        connectionEnc.getSessionRoot64() is not None
-                        or encryption_type != connectionEnc.encryption_type
-                        or (encryption_type != 0 and connectionEnc.keyid != incoming_keyid)
-                    ):
-                        print(
-                            f'UDP: refreshing encryption association for {maddr}; '
-                            f'old_type={connectionEnc.encryption_type}, new_type={encryption_type}, '
-                            f'old_keyid={connectionEnc.keyid}, new_keyid={incoming_keyid}'
-                        )
+                    # Reuse the established transport state for repeated QUIC connections.
+                    # Only refresh when the transport association itself changes.
 
                     if encryption_type != 0:
                         if connectionEnc.keyid != incoming_keyid or connectionEnc.encryption_type != encryption_type:
-                            d = await self._init_encrypted_initial_connection(connectionEnc, encryption_type, cast(Tuple[int, int], incoming_keyid), data, addr)
-                            if d is None:
-                                return
+                            restored = self._restore_connection_from_inactive_keyid(connectionEnc, cast(Tuple[int, int], incoming_keyid))
+                            if restored:
+                                d = connectionEnc.domain
+                            else:
+                                d = await self._init_encrypted_initial_connection(connectionEnc, encryption_type, cast(Tuple[int, int], incoming_keyid), data, addr)
+                                if d is None:
+                                    return
                         else:
                             d = self._kdc.getDomainById(cast(Any, incoming_keyid))
                             if d is None:

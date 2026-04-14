@@ -23,6 +23,7 @@ class DEPConfig:
                  incoming_datagram_workers: int = 1,
                  incoming_datagram_queue_size: int = 8192,
                  incoming_datagram_global_lock: bool = False,
+                 max_inactive_transport_sessions: int = 8192,
                  ) -> None:
         """
         # Datagram Encryption Protocol Config
@@ -44,6 +45,7 @@ class DEPConfig:
         :incoming_datagram_workers: количество фиксированных workers для входящих UDP датаграмм
         :incoming_datagram_queue_size: max размер очереди на worker для входящих UDP датаграмм
         :incoming_datagram_global_lock: если True, все входящие датаграммы обрабатываются строго последовательно через глобальный lock
+        :max_inactive_transport_sessions: max количество неактивных pre-QUIC/PQ transport-сессий, которые сохраняются после разрыва QUIC для resume без повторного PQ handshake
 
         """
         self.kdc_active_key_synchronization_domain_filter = kdc_active_key_synchronization_domain_filter
@@ -59,6 +61,7 @@ class DEPConfig:
         self.incoming_datagram_workers = max(1, int(incoming_datagram_workers or 1))
         self.incoming_datagram_queue_size = max(1, int(incoming_datagram_queue_size or 1))
         self.incoming_datagram_global_lock = bool(incoming_datagram_global_lock)
+        self.max_inactive_transport_sessions = max(1, int(max_inactive_transport_sessions or 1))
 
         self._kdc_allowed_domains_matcher = DomainMatcherList(self.kdc_allowed_domains) if self.kdc_allowed_domains is not None else None
 

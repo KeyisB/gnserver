@@ -468,6 +468,7 @@ class App:
 
             super().__init__(*a, datagramEndpoint=datagramEndpoint, client=False, **kw)
             self.setDatagramEndpoint(datagramEndpoint)
+            setattr(self._quic, '_gn_pq_server_kdc_key_fetcher', lambda: self.datagramEndpoint.getPeerKdcKey(self))
             self._buffer: Dict[int, bytearray] = {}
             self._streams: Dict[int, Dict[str, Any]] = {}
 
@@ -559,6 +560,11 @@ class App:
 
             if self._domain is not None and self._api.connections.get(self._domain) is self:
                 self._api.connections.pop(self._domain, None)
+
+            try:
+                self.datagramEndpoint.markProtocolInactive(self)
+            except Exception:
+                logger.debug('Failed to mark datagram protocol state inactive for disconnected connection')
 
             try:
                 self.datagramEndpoint.dropProtocolState(self)

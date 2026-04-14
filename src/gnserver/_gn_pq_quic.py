@@ -383,13 +383,24 @@ def _gn_pq_server_handle_certificate(self: tls.Context, input_buf: Buffer, outpu
     if certificate_data != b"":
         raise tls.AlertIllegalParameter("GN PQ client finish must not carry an X.509 certificate")
 
+    effective_kdc_key = settings.kdc_key
+    server_kdc_key_fetcher = getattr(self, "_gn_pq_server_kdc_key_fetcher", None)
+    if server_kdc_key_fetcher is not None:
+        try:
+            fetched_kdc_key = server_kdc_key_fetcher()
+        except Exception as exc:
+            raise tls.AlertInternalError("GN PQ server KDC key fetch failed") from exc
+
+        if fetched_kdc_key is not None:
+            effective_kdc_key = fetched_kdc_key
+
     try:
         client_finish = GNPQClientFinish.from_bytes(certificate_extensions)
         established: GNPQEstablishedState = complete_server_handshake(
             local_server_domain=settings.server_domain,
             server_state=server_state,
             client_finish=client_finish,
-            kdc_key=settings.kdc_key,
+            kdc_key=effective_kdc_key,
         )
     except Exception as exc:
         raise tls.AlertHandshakeFailure("GN PQ server completion failed") from exc
@@ -403,6 +414,7 @@ def _install_gn_pq_tls_hooks(
     *,
     client_settings: Optional[GNQuicClientSettings],
     server_settings: Optional[GNQuicServerSettings],
+    server_kdc_key_fetcher: Optional[Callable[[], Optional[bytes]]] = None,
 ) -> None:
     context._gn_pq_client_settings = client_settings
     context._gn_pq_server_settings = server_settings
@@ -411,6 +423,7 @@ def _install_gn_pq_tls_hooks(
     context._gn_pq_server_hello = None
     context._gn_pq_established = None
     context._gn_pq_client_completion = None
+    context._gn_pq_server_kdc_key_fetcher = server_kdc_key_fetcher
 
     context._client_handle_encrypted_extensions = MethodType(_gn_pq_client_handle_encrypted_extensions, context)
     context._client_handle_finished = MethodType(_gn_pq_client_handle_finished, context)
@@ -456,6 +469,7 @@ class GNQuicConnection(QuicConnection):
             self.tls,
             client_settings=self._gn_pq_client_settings,
             server_settings=self._gn_pq_server_settings,
+            server_kdc_key_fetcher=getattr(self, "_gn_pq_server_kdc_key_fetcher", None),
         )
 
         if self._gn_pq_client_settings is not None:
