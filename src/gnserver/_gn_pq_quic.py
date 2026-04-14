@@ -332,7 +332,7 @@ def _gn_pq_server_handle_hello(
         tls.Context._server_handle_hello(self, input_buf, initial_buf, handshake_buf, onertt_buf)
         return
 
-    peer_hello = tls.pull_client_hello(Buffer(data=input_buf.data))
+    peer_hello = tls.pull_client_hello(Buffer(data=input_buf.data_slice(0, input_buf.capacity)))
     client_hello_payload = _find_extension(peer_hello.other_extensions, GN_PQ_CLIENT_HELLO_EXTENSION_TYPE)
     if client_hello_payload is None:
         tls.Context._server_handle_hello(self, input_buf, initial_buf, handshake_buf, onertt_buf)
