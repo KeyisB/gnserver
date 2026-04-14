@@ -780,6 +780,15 @@ class RawQuicClient(QuicProtocolShell):
 class QuicClient:
     """Обёртка‑фасад над RawQuicClient."""
 
+    @staticmethod
+    def _consume_future_exception(fut: asyncio.Future) -> None:
+        if fut.cancelled():
+            return
+        try:
+            fut.exception()
+        except Exception:
+            return
+
     def __init__(self, Client: AsyncClient, domain: str):
         self._client = Client
         self.domain = domain
@@ -790,6 +799,7 @@ class QuicClient:
         self.status: Literal['active', 'connecting', 'disconnect'] = 'connecting'
 
         self.connect_future = asyncio.get_event_loop().create_future()
+        self.connect_future.add_done_callback(self._consume_future_exception)
 
         self.ready = asyncio.get_running_loop().create_future()
 
@@ -824,10 +834,12 @@ class QuicClient:
         except Exception:
             gn_pq_kdc_key = None
 
-        gn_pq_client_settings = build_gn_pq_client_settings(
-            self.domain,
-            kdc_key=gn_pq_kdc_key,
-        )
+        gn_pq_client_settings = None
+        if bootstrap_requires_kdc:
+            gn_pq_client_settings = build_gn_pq_client_settings(
+                self.domain,
+                kdc_key=gn_pq_kdc_key,
+            )
 
         self._client_cm = connect(
             self,
