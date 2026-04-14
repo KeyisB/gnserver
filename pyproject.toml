@@ -4,13 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "GNServer"
-version = "0.0.148"
-dependencies = [
-	"aioquic",
-	"cryptography",
-	"msgpack",
-	"pycryptodome",
-]
+version = "0.0.150"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

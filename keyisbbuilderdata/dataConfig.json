@@ -10,9 +10,10 @@
         "cryptography"
     ],
     "package_data": {
-        "gnserver": [
+        "GNServer": [
             "oqs/bin/*.dll",
             "oqs/bin/*.so"
         ]
-    }
+    },
+    "manifest": "recursive-include src/GNServer/oqs/bin *.dll\nrecursive-include src/GNServer/oqs/bin *.so"
 }
