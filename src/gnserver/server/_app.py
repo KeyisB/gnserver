@@ -468,6 +468,7 @@ class App:
 
             super().__init__(*a, datagramEndpoint=datagramEndpoint, client=False, **kw)
             self.setDatagramEndpoint(datagramEndpoint)
+            setattr(self._quic, '_gn_pq_server_kdc_key_fetcher', lambda: self.datagramEndpoint.getPeerKdcKey(self))
             self._buffer: Dict[int, bytearray] = {}
             self._streams: Dict[int, Dict[str, Any]] = {}
 
