@@ -887,11 +887,22 @@ def _gn_pq_server_handle_certificate(self: tls.Context, input_buf: Buffer, outpu
             "server handle_certificate decoded client finish "
             f"ciphertext_len={len(client_finish.ml_kem_ciphertext)}"
         )
+
+        kdc_key = settings.kdc_key
+        kdc_key_fetcher = getattr(self, "_gn_pq_server_kdc_key_fetcher", None)
+        if kdc_key_fetcher is not None:
+            fetched_key = kdc_key_fetcher()
+            if fetched_key is not None:
+                kdc_key = fetched_key
+                _gn_pq_log("server handle_certificate using per-peer kdc_key from fetcher")
+            else:
+                _gn_pq_log("server handle_certificate fetcher returned None, using settings kdc_key")
+
         established: GNPQEstablishedState = complete_server_handshake(
             local_server_domain=settings.server_domain,
             server_state=server_state,
             client_finish=client_finish,
-            kdc_key=settings.kdc_key,
+            kdc_key=kdc_key,
         )
     except Exception as exc:
         _gn_pq_log(f"server handshake completion failed for {settings.server_domain!r}: {type(exc).__name__}: {exc}")
@@ -900,7 +911,7 @@ def _gn_pq_server_handle_certificate(self: tls.Context, input_buf: Buffer, outpu
     self._gn_pq_established = established
     _gn_pq_log(
         f"server handshake completed for {settings.server_domain!r} "
-        f"kdc_key={'set' if settings.kdc_key is not None else 'none'}"
+        f"kdc_key={'set' if kdc_key is not None else 'none'}"
     )
     self._server_expect_finished(output_buf)
     _gn_pq_log(

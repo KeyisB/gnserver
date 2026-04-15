@@ -39,6 +39,7 @@ from .oqs import (
     get_enabled_sig_mechanisms,
 )
 
+from KeyisBTools import userFriendly
 
 def _gn_pq_handshake_log(message: str) -> None:
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
@@ -475,7 +476,9 @@ def complete_client_handshake(
         f"cf_fp={hashlib.sha3_256(cf_bytes).hexdigest()[:16]} "
         f"mlkem_ss_fp={hashlib.sha3_256(ml_kem_shared_secret).hexdigest()[:16]} "
         f"x25519_ss_fp={hashlib.sha3_256(x25519_shared_secret).hexdigest()[:16]} "
-        f"kdc_key_fp={hashlib.sha3_256(kdc_key).hexdigest()[:16] if kdc_key else 'none'}"
+        f"kdc_key_fp={kdc_key.hex() if kdc_key else 'none'} "
+        f"kdc_key={kdc_key if kdc_key else 'none'} "
+        f"kdc_key_uf={userFriendly.encode(kdc_key) if kdc_key else 'none'}"
     )
 
     established = GNPQEstablishedState(transcript_hash=transcript_hash, root64=root64)
@@ -528,6 +531,8 @@ def complete_server_handshake(
         f"cf_fp={hashlib.sha3_256(cf_bytes).hexdigest()[:16]} "
         f"mlkem_ss_fp={hashlib.sha3_256(ml_kem_shared_secret).hexdigest()[:16]} "
         f"x25519_ss_fp={hashlib.sha3_256(server_state.x25519_shared_secret).hexdigest()[:16]} "
-        f"kdc_key_fp={hashlib.sha3_256(kdc_key).hexdigest()[:16] if kdc_key else 'none'}"
+        f"kdc_key_fp={kdc_key.hex() if kdc_key else 'none'} "
+        f"kdc_key={kdc_key if kdc_key else 'none'} "
+        f"kdc_key_uf={userFriendly.encode(kdc_key) if kdc_key else 'none'}"
     )
     return GNPQEstablishedState(transcript_hash=transcript_hash, root64=root64)
