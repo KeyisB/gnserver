@@ -384,24 +384,13 @@ def _gn_pq_server_handle_certificate(self: tls.Context, input_buf: Buffer, outpu
     if certificate_data != b"":
         raise tls.AlertIllegalParameter("GN PQ client finish must not carry an X.509 certificate")
 
-    effective_kdc_key = settings.kdc_key
-    server_kdc_key_fetcher = getattr(self, "_gn_pq_server_kdc_key_fetcher", None)
-    if server_kdc_key_fetcher is not None:
-        try:
-            fetched_kdc_key = server_kdc_key_fetcher()
-        except Exception as exc:
-            raise tls.AlertInternalError("GN PQ server KDC key fetch failed") from exc
-
-        if fetched_kdc_key is not None:
-            effective_kdc_key = fetched_kdc_key
-
     try:
         client_finish = GNPQClientFinish.from_bytes(certificate_extensions)
         established: GNPQEstablishedState = complete_server_handshake(
             local_server_domain=settings.server_domain,
             server_state=server_state,
             client_finish=client_finish,
-            kdc_key=effective_kdc_key,
+            kdc_key=settings.kdc_key,
         )
     except Exception as exc:
         raise tls.AlertHandshakeFailure("GN PQ server completion failed") from exc
