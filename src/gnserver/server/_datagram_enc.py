@@ -52,6 +52,12 @@ def _prequic_log(message: str) -> None:
     print(f"[{stamp}] [GN PREQUIC] {message}")
 
 
+def _format_cid(value: bytes) -> str:
+    if not value:
+        return "-"
+    return value.hex()
+
+
 
 def is_quic_initial(b0: int) -> bool:
     return (b0 & 0xF0) == 0xC0
@@ -268,6 +274,49 @@ class QuicProtocolShell(QuicConnectionProtocol):
     def setDefault_max_datagram_size(self):
         self._quic._max_datagram_size = self._upd_datagram_size
 
+    def _debug_runtime_state(self) -> str:
+        tls_context = getattr(self._quic, 'tls', None)
+        tls_state = getattr(tls_context, 'state', None)
+        host_cids = [
+            _format_cid(connection_id.cid)
+            for connection_id in getattr(self._quic, '_host_cids', [])
+        ]
+        return (
+            f"connected={self._connected} handshake_complete={getattr(self._quic, '_handshake_complete', None)} "
+            f"tls_state={tls_state} host_cids={host_cids[:4]}"
+        )
+
+    def datagram_received(self, data, addr) -> None:
+        data = cast(bytes, data)
+        host_cid_length = getattr(getattr(self._quic, '_configuration', None), 'connection_id_length', None)
+        try:
+            header = pull_quic_header(Buffer(data=data), host_cid_length=host_cid_length)
+            extra = max(0, len(data) - header.packet_length)
+            desc = (
+                f"type={header.packet_type.name.lower()} len={header.packet_length}/{len(data)} "
+                f"version={header.version} dcid={_format_cid(header.destination_cid)} "
+                f"scid={_format_cid(header.source_cid)} token_len={len(header.token)} extra={extra}"
+            )
+        except Exception as exc:
+            desc = f"parse-error={type(exc).__name__}: {exc} len={len(data)} first={data[:8].hex()}"
+
+        _prequic_log(
+            f"protocol datagram_received enter addr={addr} quic={desc} state={self._debug_runtime_state()}"
+        )
+
+        try:
+            super().datagram_received(data, addr)
+        except Exception:
+            _prequic_log(
+                f"protocol datagram_received error addr={addr} quic={desc} state={self._debug_runtime_state()} "
+                f"trace={traceback.format_exc()}"
+            )
+            raise
+
+        _prequic_log(
+            f"protocol datagram_received exit addr={addr} quic={desc} state={self._debug_runtime_state()}"
+        )
+
     def _apply_gn_pq_session_root(self, peer_domain: Optional[str]) -> bool:
         if not peer_domain:
             return False
@@ -426,6 +475,60 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
 
     def dropProtocolState(self, proto: QuicProtocolShell):
         self.x_cid_domain.pop(proto._quic.original_destination_connection_id, None)
+
+    def _get_quic_host_cid_length(self) -> Optional[int]:
+        quic_obj = getattr(self._quic_routing, '_quic', None)
+        if quic_obj is not None:
+            config = getattr(quic_obj, '_configuration', None)
+            if config is not None:
+                return getattr(config, 'connection_id_length', None)
+
+        config = getattr(self._quic_routing, '_configuration', None)
+        if config is not None:
+            return getattr(config, 'connection_id_length', None)
+
+        return None
+
+    def _describe_quic_datagram(self, data: bytes) -> str:
+        if not data:
+            return 'empty'
+
+        host_cid_length = self._get_quic_host_cid_length()
+        try:
+            header = pull_quic_header(Buffer(data=data), host_cid_length=host_cid_length)
+            extra = max(0, len(data) - header.packet_length)
+            return (
+                f"type={header.packet_type.name.lower()} len={header.packet_length}/{len(data)} "
+                f"version={header.version} dcid={_format_cid(header.destination_cid)} "
+                f"scid={_format_cid(header.source_cid)} token_len={len(header.token)} extra={extra}"
+            )
+        except Exception as exc:
+            return f"parse-error={type(exc).__name__}: {exc} len={len(data)} first={data[:8].hex()}"
+
+    def _describe_routing_state(self) -> str:
+        if isinstance(self._quic_routing, QuicProtocolShell):
+            return self._quic_routing._debug_runtime_state()
+        return f"routing=server protocols={len(getattr(self._quic_routing, '_protocols', {}))}"
+
+    def _describe_cid_match(self, data: bytes) -> str:
+        if not isinstance(self._quic_routing, QuicProtocolShell):
+            return 'cid_match=server-routing'
+
+        host_cid_length = self._get_quic_host_cid_length()
+        try:
+            header = pull_quic_header(Buffer(data=data), host_cid_length=host_cid_length)
+        except Exception as exc:
+            return f'cid_match=parse-error={type(exc).__name__}: {exc}'
+
+        host_cids = [
+            connection_id.cid
+            for connection_id in getattr(self._quic_routing._quic, '_host_cids', [])
+        ]
+        matched = any(header.destination_cid == cid for cid in host_cids)
+        return (
+            f"cid_match={matched} dcid={_format_cid(header.destination_cid)} "
+            f"host_cids={[ _format_cid(cid) for cid in host_cids[:4] ]}"
+        )
 
     def _inactive_transport_session_limit(self) -> int:
         return max(1, int(getattr(self.DEPConfig, 'max_inactive_transport_sessions', 8192) or 1))
@@ -845,6 +948,10 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
         else:
             enc = data
 
+        _prequic_log(
+            f"sendto payload addr={maddr} quic={self._describe_quic_datagram(data)} state={connectionEnc.debug_state()}"
+        )
+
         self.transport.sendMapped(b0 + enc, addr)
 
     async def async_sendto(self, connectionEnc: 'ConnectionEncryptor', data: bytes, addr):
@@ -870,7 +977,7 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
         p = self.construct_initial(effective_encryption_type, keyid) # type: ignore
         _prequic_log(
             f"async_sendto prepared initial addr={maddr} effective_enc={effective_encryption_type} keyid={keyid} "
-            f"state={connectionEnc.debug_state()}"
+            f"quic={self._describe_quic_datagram(data)} state={connectionEnc.debug_state()}"
         )
 
         if effective_encryption_type != 0:
@@ -898,10 +1005,15 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
         
 
     async def _handle_datagram(self, data: bytes, addr):
+        if not data:
+            _prequic_log(f"handle datagram dropped: empty payload addr={addr}")
+            return
         
         value = (data[0] >> 1) & 0x7F
         if value != self._gn_protocol_version:
-            print(f"GN Prequic: UPD Version mismatch {value} != {self._gn_protocol_version}")
+            _prequic_log(
+                f"handle datagram dropped: version mismatch addr={addr} got={value} expected={self._gn_protocol_version} len={len(data)}"
+            )
             return
         
         maddr = self.from_addr_to_maddr(addr)
@@ -914,6 +1026,9 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
         d = None
 
         if data[0] & 0x01: # если системный пакет.
+            if len(data) < 10:
+                _prequic_log(f"handle system packet dropped: too short addr={maddr} len={len(data)}")
+                return
             commnd_id = (data[1] >> 4) & 0x0F
             datagram = data[10:]
             if commnd_id == 0: # initial
@@ -977,11 +1092,19 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
                 _prequic_log(
                     f"handle initial done addr={maddr} resolved_domain={d!r} state_after={connectionEnc.debug_state()}"
                 )
+            else:
+                _prequic_log(
+                    f"handle system packet addr={maddr} command_id={commnd_id} wrapped_len={len(data)} state={connectionEnc.debug_state()}"
+                )
         else:
             datagram = data[1:]
 
+            _prequic_log(
+                f"handle payload packet addr={maddr} wrapped_len={len(data)} state_before={connectionEnc.debug_state()}"
+            )
+
             if not connectionEnc.ready:
-                print('IN QUEUE')
+                _prequic_log(f"handle payload queued addr={maddr} reason=not-ready state={connectionEnc.debug_state()}")
                 connectionEnc.not_ready_queue.put_nowait((data, addr))
                 return
 
@@ -999,10 +1122,27 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
         else:
             dec = datagram
 
+        _prequic_log(
+            f"handle decrypted addr={maddr} quic={self._describe_quic_datagram(dec)} {self._describe_cid_match(dec)} "
+            f"routing_state={self._describe_routing_state()}"
+        )
+
         if d is not None and isinstance(self._quic_routing, QuicServer):
             self.add_QuicProtocolShellServer_domain(dec, d)
 
-        self._quic_routing.datagram_received(dec, addr)
+        try:
+            self._quic_routing.datagram_received(dec, addr)
+        except Exception:
+            _prequic_log(
+                f"routing datagram_received error addr={maddr} quic={self._describe_quic_datagram(dec)} "
+                f"routing_state={self._describe_routing_state()} trace={traceback.format_exc()}"
+            )
+            raise
+
+        _prequic_log(
+            f"routing datagram_received done addr={maddr} quic={self._describe_quic_datagram(dec)} "
+            f"routing_state={self._describe_routing_state()}"
+        )
 
 
 print(' '* 25 + f'PID: {os.getpid()}')

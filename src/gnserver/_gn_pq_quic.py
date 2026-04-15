@@ -50,6 +50,12 @@ def _gn_pq_log(message: str) -> None:
     print(f"[{stamp}] [GN PQ] {message}")
 
 
+def _format_cid(value: Optional[bytes]) -> str:
+    if not value:
+        return '-'
+    return value.hex()
+
+
 @dataclass(slots=True)
 class GNQuicClientSettings:
     server_domain: str
@@ -166,8 +172,12 @@ def _parse_server_certificate(crt_container: Any) -> GNPQServerCertificate:
 
 def build_gn_pq_client_settings(server_domain: str, kdc_key: Optional[bytes] = None) -> Optional[GNQuicClientSettings]:
     if not has_gn_pq_ca_public_keys():
+        _gn_pq_log(f"client settings disabled for {server_domain!r}: no GN PQ CA keys loaded")
         return None
 
+    _gn_pq_log(
+        f"client settings enabled for {server_domain!r} kdc_key={'set' if kdc_key is not None else 'none'}"
+    )
     return GNQuicClientSettings(
         server_domain=server_domain,
         kdc_key=kdc_key,
@@ -225,13 +235,16 @@ def _find_extension(extensions: Optional[list[tuple[int, bytes]]], extension_typ
 
 def _gn_pq_client_handle_encrypted_extensions(self: tls.Context, input_buf: Buffer) -> None:
     tls.Context._client_handle_encrypted_extensions(self, input_buf)
+    _gn_pq_log("client handle_encrypted_extensions entered")
 
     settings = getattr(self, "_gn_pq_client_settings", None)
     if settings is None:
+        _gn_pq_log("client handle_encrypted_extensions skipped: no client settings")
         return
 
     server_hello_payload = _find_extension(self.received_extensions, GN_PQ_SERVER_HELLO_EXTENSION_TYPE)
     if server_hello_payload is None:
+        _gn_pq_log("client handle_encrypted_extensions: GN PQ server hello extension missing")
         return
 
     try:
@@ -253,7 +266,13 @@ def _gn_pq_client_handle_finished(self: tls.Context, input_buf: Buffer, output_b
     server_hello = getattr(self, "_gn_pq_server_hello", None)
     client_state = getattr(self, "_gn_pq_client_state", None)
 
+    _gn_pq_log(
+        "client handle_finished entered "
+        f"settings={settings is not None} server_hello={server_hello is not None} client_state={client_state is not None}"
+    )
+
     if settings is None or server_hello is None or client_state is None:
+        _gn_pq_log("client handle_finished fallback to base TLS path")
         tls.Context._client_handle_finished(self, input_buf, output_buf)
         return
 
@@ -354,12 +373,14 @@ def _gn_pq_server_handle_hello(
 ) -> None:
     settings = getattr(self, "_gn_pq_server_settings", None)
     if settings is None:
+        _gn_pq_log("server handle_hello fallback: no server settings")
         tls.Context._server_handle_hello(self, input_buf, initial_buf, handshake_buf, onertt_buf)
         return
 
     peer_hello = tls.pull_client_hello(Buffer(data=input_buf.data_slice(0, input_buf.capacity)))
     client_hello_payload = _find_extension(peer_hello.other_extensions, GN_PQ_CLIENT_HELLO_EXTENSION_TYPE)
     if client_hello_payload is None:
+        _gn_pq_log(f"server handle_hello: GN PQ client hello extension missing for {settings.server_domain!r}")
         tls.Context._server_handle_hello(self, input_buf, initial_buf, handshake_buf, onertt_buf)
         return
 
@@ -397,7 +418,13 @@ def _gn_pq_server_handle_certificate(self: tls.Context, input_buf: Buffer, outpu
     settings = getattr(self, "_gn_pq_server_settings", None)
     server_state = getattr(self, "_gn_pq_server_state", None)
 
+    _gn_pq_log(
+        "server handle_certificate entered "
+        f"settings={settings is not None} server_state={server_state is not None}"
+    )
+
     if settings is None or server_state is None:
+        _gn_pq_log("server handle_certificate fallback to base TLS path")
         tls.Context._server_handle_certificate(self, input_buf, output_buf)
         return
 
@@ -486,6 +513,13 @@ class GNQuicConnection(QuicConnection):
 
     def _initialize(self, peer_cid: bytes) -> None:
         super()._initialize(peer_cid)
+
+        _gn_pq_log(
+            f"quic initialize is_client={self._is_client} peer_cid={_format_cid(peer_cid)} "
+            f"host_cid={_format_cid(getattr(self, 'host_cid', None))} "
+            f"odcid={_format_cid(getattr(self, 'original_destination_connection_id', None))} "
+            f"client_settings={self._gn_pq_client_settings is not None} server_settings={self._gn_pq_server_settings is not None}"
+        )
 
         _install_gn_pq_tls_hooks(
             self.tls,
@@ -597,6 +631,12 @@ class GNQuicServer(AioQuicServer):
                 session_ticket_fetcher=self._session_ticket_fetcher,
                 session_ticket_handler=self._session_ticket_handler,
                 gn_pq_server_settings=self._gn_pq_server_settings,
+            )
+            _gn_pq_log(
+                f"server created protocol addr={addr} packet_len={len(data)} "
+                f"header_type={header.packet_type.name.lower()} dcid={_format_cid(header.destination_cid)} "
+                f"scid={_format_cid(header.source_cid)} odcid={_format_cid(original_destination_connection_id)} "
+                f"host_cid={_format_cid(connection.host_cid)}"
             )
             protocol = self._create_protocol(
                 connection, stream_handler=self._stream_handler

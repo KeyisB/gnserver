@@ -87,6 +87,12 @@ async def connect(
     sock = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
     sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
     sock.bind(("::", local_port, 0, 0))
+    local_addr = sock.getsockname()
+
+    print(
+        f"[GN QUIC SHELL] bind local_addr={local_addr} remote_addr={addr} domain={domain!r} "
+        f"encType={encType} wait_connected={wait_connected} server_name={configuration.server_name!r}"
+    )
 
 
     transport, _ = await loop.create_datagram_endpoint(

@@ -9,6 +9,7 @@ from typing import Any, Awaitable, Dict, Deque, Tuple, Union, Optional, AsyncGen
 from aioquic.quic.events import QuicEvent, StreamDataReceived, StreamReset, ConnectionTerminated, HandshakeCompleted
 from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.connection import QuicConnection
+from aioquic.quic.packet import QuicErrorCode
 from pathlib import Path
 import traceback
 import logging
@@ -703,9 +704,14 @@ class RawQuicClient(QuicProtocolShell):
             if self.quicClient is None:
                 return
 
+            try:
+                error_name = QuicErrorCode(event.error_code).name
+            except Exception:
+                error_name = 'UNKNOWN'
+
             logger.warning(
                 f'ConnectionTerminated for {self._QuicClient.domain}: '
-                f'code={event.error_code} frame_type={event.frame_type} '
+                f'code={event.error_code}({error_name}) frame_type={event.frame_type} '
                 f'reason={event.reason_phrase!r}'
             )
 
@@ -909,6 +915,13 @@ class QuicClient:
                 self.domain,
                 kdc_key=gn_pq_kdc_key,
             )
+
+        logger.debug(
+            f"Connect setup domain={self.domain} target={ip}:{port} encType={encType} "
+            f"bootstrap_requires_kdc={bootstrap_requires_kdc} resume_inactive={resume_inactive_transport_session} "
+            f"server_name={cfg.server_name!r} gn_pq={'on' if gn_pq_client_settings is not None else 'off'} "
+            f"kdc_key={'set' if gn_pq_kdc_key is not None else 'none'}"
+        )
 
         self._client_cm = connect(
             self,

@@ -11,6 +11,7 @@ import logging
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union, AsyncGenerator, cast, Coroutine, ParamSpec, Concatenate, TypeVar, Literal
 from aioquic.asyncio.server import QuicServer
 from aioquic.quic.configuration import QuicConfiguration
+from aioquic.quic.packet import QuicErrorCode
 from aioquic.quic.events import QuicEvent, StreamDataReceived
 from typing import Any, AsyncGenerator, Union
 from aioquic.quic.events import (
@@ -542,8 +543,12 @@ class App:
             
 
             elif isinstance(event, ConnectionTerminated):
+                try:
+                    error_name = QuicErrorCode(event.error_code).name
+                except Exception:
+                    error_name = 'UNKNOWN'
                 reason = (
-                    f"code={event.error_code} frame_type={event.frame_type} "
+                    f"code={event.error_code}({error_name}) frame_type={event.frame_type} "
                     f"reason={event.reason_phrase!r}"
                 )
                 self._trigger_disconnect(f"ConnectionTerminated: {reason}")
