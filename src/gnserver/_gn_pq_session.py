@@ -8,7 +8,7 @@ from KeyisBTools.models.serialization import deserialize, serialize
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-GN_PQ_KEM_ALGORITHM: Final[str] = "ML-KEM-1024"
+GN_PQ_KEM_ALGORITHM: Final[str] = "ml-kem-1024"
 GN_PQ_SIGNATURE_ALGORITHM: Final[str] = "ml-dsa-87"
 
 _ALGORITHM_NAME_ALIASES: Final[dict[str, str]] = {

@@ -55,12 +55,18 @@ OQS_SUCCESS: Final[int] = 0
 OQS_ERROR: Final[int] = -1
 
 _KEM_ALIASES: Final[dict[str, str]] = {
+    "ml-kem-512": "ML-KEM-512",
+    "ml-kem-768": "ML-KEM-768",
+    "ml-kem-1024": "ML-KEM-1024",
     "kyber512": "ML-KEM-512",
     "kyber768": "ML-KEM-768",
     "kyber1024": "ML-KEM-1024",
 }
 
 _SIG_ALIASES: Final[dict[str, str]] = {
+    "ml-dsa-44": "ML-DSA-44",
+    "ml-dsa-65": "ML-DSA-65",
+    "ml-dsa-87": "ML-DSA-87",
     "dilithium2": "ML-DSA-44",
     "dilithium3": "ML-DSA-65",
     "dilithium5": "ML-DSA-87",

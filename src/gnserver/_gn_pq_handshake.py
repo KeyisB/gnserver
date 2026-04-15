@@ -6,7 +6,7 @@ import time
 import traceback
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Optional
+from typing import Final, Optional
 
 from cryptography.hazmat.primitives.asymmetric.x25519 import (
     X25519PrivateKey,
@@ -31,7 +31,13 @@ from ._gn_pq_session import (
     derive_session_root64,
     verify_commit_payload,
 )
-from .oqs import KeyEncapsulation, Signature, get_enabled_sig_mechanisms
+from .oqs import (
+    KeyEncapsulation,
+    MechanismNotSupportedError,
+    Signature,
+    get_enabled_kem_mechanisms,
+    get_enabled_sig_mechanisms,
+)
 
 
 def _gn_pq_handshake_log(message: str) -> None:
@@ -45,6 +51,39 @@ def _sha3_256_hex(data: bytes) -> str:
     return h.finalize().hex()
 
 
+_GN_PQ_KEM_ALIASES: Final[dict[str, str]] = {
+    "kyber512": "ml-kem-512",
+    "kyber768": "ml-kem-768",
+    "kyber1024": "ml-kem-1024",
+}
+
+_GN_PQ_SIGNATURE_ALIASES: Final[dict[str, str]] = {
+    "dilithium2": "ml-dsa-44",
+    "dilithium3": "ml-dsa-65",
+    "dilithium5": "ml-dsa-87",
+}
+
+
+def _normalize_gn_pq_algorithm_name(
+    algorithm: str,
+    *,
+    aliases: dict[str, str],
+    enabled_algorithms: tuple[str, ...],
+) -> str:
+    normalized_algorithm = aliases.get(algorithm.casefold(), algorithm.casefold())
+    for candidate in enabled_algorithms:
+        if candidate.casefold() == normalized_algorithm:
+            return normalized_algorithm
+    raise MechanismNotSupportedError(algorithm)
+
+
+def _get_oqs_algorithm_name(normalized_algorithm: str, *, enabled_algorithms: tuple[str, ...]) -> str:
+    for candidate in enabled_algorithms:
+        if candidate.casefold() == normalized_algorithm:
+            return candidate
+    raise MechanismNotSupportedError(normalized_algorithm)
+
+
 @dataclass(slots=True)
 class GNPQSignatureKeyMaterial:
     public_key: bytes
@@ -53,15 +92,16 @@ class GNPQSignatureKeyMaterial:
 
     @classmethod
     def generate(cls, algorithm: str = GN_PQ_SIGNATURE_ALGORITHM) -> GNPQSignatureKeyMaterial:
-        with Signature(algorithm) as sig:
+        normalized_algorithm = normalize_gn_pq_signature_algorithm_name(algorithm)
+        oqs_algorithm = get_oqs_gn_pq_signature_algorithm_name(normalized_algorithm)
+        with Signature(oqs_algorithm) as sig:
             public_key = sig.generate_keypair()
             private_key = sig.export_secret_key()
-            algorithm_name = str(sig.details["name"])
 
         return cls(
             public_key=public_key,
             private_key=private_key,
-            algorithm=algorithm_name,
+            algorithm=normalized_algorithm,
         )
 
 
@@ -72,15 +112,35 @@ class GNPQCertifiedServerIdentity:
 
 
 def normalize_gn_pq_signature_algorithm_name(algorithm: str) -> str:
-    try:
-        with Signature(algorithm) as sig:
-            return str(sig.details["name"]).casefold()
-    except Exception:
-        algorithm_cf = algorithm.casefold()
-        for candidate in get_enabled_sig_mechanisms():
-            if candidate.casefold() == algorithm_cf:
-                return candidate.casefold()
-        raise
+    return _normalize_gn_pq_algorithm_name(
+        algorithm,
+        aliases=_GN_PQ_SIGNATURE_ALIASES,
+        enabled_algorithms=get_enabled_sig_mechanisms(),
+    )
+
+
+def get_oqs_gn_pq_signature_algorithm_name(algorithm: str) -> str:
+    normalized_algorithm = normalize_gn_pq_signature_algorithm_name(algorithm)
+    return _get_oqs_algorithm_name(
+        normalized_algorithm,
+        enabled_algorithms=get_enabled_sig_mechanisms(),
+    )
+
+
+def normalize_gn_pq_kem_algorithm_name(algorithm: str) -> str:
+    return _normalize_gn_pq_algorithm_name(
+        algorithm,
+        aliases=_GN_PQ_KEM_ALIASES,
+        enabled_algorithms=get_enabled_kem_mechanisms(),
+    )
+
+
+def get_oqs_gn_pq_kem_algorithm_name(algorithm: str) -> str:
+    normalized_algorithm = normalize_gn_pq_kem_algorithm_name(algorithm)
+    return _get_oqs_algorithm_name(
+        normalized_algorithm,
+        enabled_algorithms=get_enabled_kem_mechanisms(),
+    )
 
 
 def get_default_gn_pq_signature_algorithm_name() -> str:
@@ -90,7 +150,8 @@ def get_default_gn_pq_signature_algorithm_name() -> str:
 @lru_cache(maxsize=None)
 def get_gn_pq_signature_artifact_lengths(algorithm: str) -> tuple[int, int, int]:
     normalized_algorithm = normalize_gn_pq_signature_algorithm_name(algorithm)
-    with Signature(normalized_algorithm) as sig:
+    oqs_algorithm = get_oqs_gn_pq_signature_algorithm_name(normalized_algorithm)
+    with Signature(oqs_algorithm) as sig:
         return (
             int(sig.details["length_public_key"]),
             int(sig.details["length_secret_key"]),
@@ -130,7 +191,8 @@ def issue_server_certificate(
         f"unsigned_len={len(unsigned_certificate.unsigned_bytes())}"
     )
 
-    with Signature(ca_signature_algorithm, secret_key=ca_private_key) as ca_sig:
+    oqs_ca_signature_algorithm = get_oqs_gn_pq_signature_algorithm_name(ca_signature_algorithm)
+    with Signature(oqs_ca_signature_algorithm, secret_key=ca_private_key) as ca_sig:
         signature = ca_sig.sign(certificate_message)
 
     return GNPQServerCertificate(
@@ -181,7 +243,8 @@ def verify_server_certificate(
         f"sig_head={certificate.signature[:16].hex()}"
     )
 
-    with Signature(ca_signature_algorithm) as ca_sig:
+    oqs_ca_signature_algorithm = get_oqs_gn_pq_signature_algorithm_name(ca_signature_algorithm)
+    with Signature(oqs_ca_signature_algorithm) as ca_sig:
         source_valid = ca_sig.verify(certificate_message, certificate.signature, ca_public_key)
         _gn_pq_handshake_log(f"verify_server_certificate source_valid={source_valid}")
 
@@ -286,11 +349,12 @@ def build_server_handshake(
         raise ValueError("Server certificate name does not match local server domain")
 
     signature_algorithm = get_default_gn_pq_signature_algorithm_name()
+    oqs_signature_algorithm = get_oqs_gn_pq_signature_algorithm_name(signature_algorithm)
     if signature_algorithm not in server_identity.private_keys:
         raise ValueError(f"Server identity does not contain private key for {signature_algorithm}")
     server_identity.certificate.get_public_key(signature_algorithm)
 
-    with KeyEncapsulation(GN_PQ_KEM_ALGORITHM) as kem:
+    with KeyEncapsulation(get_oqs_gn_pq_kem_algorithm_name(GN_PQ_KEM_ALGORITHM)) as kem:
         ml_kem_public_key = kem.generate_keypair()
         ml_kem_private_key = kem.export_secret_key()
 
@@ -313,7 +377,7 @@ def build_server_handshake(
         unsigned_server_hello.unsigned_bytes(),
     )
 
-    with Signature(signature_algorithm, secret_key=server_identity.private_keys[signature_algorithm]) as sig:
+    with Signature(oqs_signature_algorithm, secret_key=server_identity.private_keys[signature_algorithm]) as sig:
         signature = sig.sign(signature_message)
 
     server_hello = GNPQServerHello(
@@ -365,7 +429,7 @@ def complete_client_handshake(
         server_hello.unsigned_bytes(),
     )
     server_public_key = server_hello.server_certificate.get_public_key(server_hello.signature_algorithm)
-    with Signature(server_hello.signature_algorithm) as sig:
+    with Signature(get_oqs_gn_pq_signature_algorithm_name(server_hello.signature_algorithm)) as sig:
         if not sig.verify(signature_message, server_hello.signature, server_public_key):
             raise ValueError("Invalid server ML-DSA signature in server hello")
     _gn_pq_handshake_log("step 2: verify server ML-DSA signature OK")
@@ -376,7 +440,7 @@ def complete_client_handshake(
     _gn_pq_handshake_log("step 3: X25519 key exchange OK")
 
     _gn_pq_handshake_log("step 4: ML-KEM encapsulation")
-    with KeyEncapsulation(GN_PQ_KEM_ALGORITHM) as kem:
+    with KeyEncapsulation(get_oqs_gn_pq_kem_algorithm_name(GN_PQ_KEM_ALGORITHM)) as kem:
         ml_kem_ciphertext, ml_kem_shared_secret = kem.encap_secret(server_hello.server_ml_kem_public_key)
     _gn_pq_handshake_log("step 4: ML-KEM encapsulation OK")
 
@@ -414,7 +478,10 @@ def complete_server_handshake(
     client_finish: GNPQClientFinish,
     kdc_key: Optional[bytes] = None,
 ) -> GNPQEstablishedState:
-    with KeyEncapsulation(GN_PQ_KEM_ALGORITHM, secret_key=server_state.ml_kem_private_key) as kem:
+    with KeyEncapsulation(
+        get_oqs_gn_pq_kem_algorithm_name(GN_PQ_KEM_ALGORITHM),
+        secret_key=server_state.ml_kem_private_key,
+    ) as kem:
         ml_kem_shared_secret = kem.decap_secret(client_finish.ml_kem_ciphertext)
 
     transcript_hash = build_transcript_hash(
