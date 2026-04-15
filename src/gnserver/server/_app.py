@@ -526,6 +526,7 @@ class App:
             
         def quic_event_received(self, event: QuicEvent):
             if isinstance(event, HandshakeCompleted):
+                self.setDefault_max_datagram_size()
                 self._refresh_domain()
                 self._apply_gn_pq_session_root(self._domain)
 

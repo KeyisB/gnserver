@@ -261,10 +261,9 @@ class QuicProtocolShell(QuicConnectionProtocol):
             - (31 if datagramEndpoint._default_encryption_type != 0 else 0) # encryption data
             )
 
-        if self._client:
-            self._quic._max_datagram_size = self._upd_datagram_size - 9 # first packet
-        else:
-            self._quic._max_datagram_size = self._upd_datagram_size
+        # GN pre-QUIC Initial packets carry 9 more bytes of framing than regular packets.
+        # Keep both client and server on the Initial-safe limit until the handshake completes.
+        self._quic._max_datagram_size = self._upd_datagram_size - 9
 
     def setDefault_max_datagram_size(self):
         self._quic._max_datagram_size = self._upd_datagram_size

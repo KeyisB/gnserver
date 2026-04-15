@@ -579,6 +579,7 @@ class RawQuicClient(QuicProtocolShell):
 
     def quic_event_received(self, event: QuicEvent) -> None:
         if isinstance(event, HandshakeCompleted):
+            self.setDefault_max_datagram_size()
             self._apply_gn_pq_session_root(self._QuicClient.domain)
             return
 
