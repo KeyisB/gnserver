@@ -52,6 +52,31 @@ def is_quic_initial(b0: int) -> bool:
     return (b0 & 0xF0) == 0xC0
 
 
+def _derive_bootstrap_transport_keys(
+    shared_key: bytes,
+    *,
+    peer_domain: str,
+    initiator: bool,
+) -> tuple[bytes, bytes]:
+    client_to_server = HKDF(
+        algorithm=hashes.SHA3_512(),
+        length=32,
+        salt=peer_domain.encode() + b':c2s',
+        info=b'gn:DgEncryptor',
+    ).derive(shared_key)
+    server_to_client = HKDF(
+        algorithm=hashes.SHA3_512(),
+        length=32,
+        salt=peer_domain.encode() + b':s2c',
+        info=b'gn:DgEncryptor',
+    ).derive(shared_key)
+
+    if initiator:
+        return server_to_client, client_to_server
+
+    return client_to_server, server_to_client
+
+
 class ConnectionEncryptor:
     def __init__(self, eEndpoint: 'DatagramEndpoint'):
         self.counter = 0 # 8B
@@ -114,13 +139,12 @@ class ConnectionEncryptor:
 
         if DestDomain is None:
             raise AllGNFastCommands.transport.KeyDomainNotFound({'keyid': keyid})
-        
-        self_domain = self.eEndpoint._kdc._client._domain
-        
-        
-        
-        key_in = HKDF(algorithm=hashes.SHA3_512(), length=32, salt=DestDomain.encode() + self_domain.encode(), info=b'gn:DgEncryptor').derive(key)
-        key_out = HKDF(algorithm=hashes.SHA3_512(), length=32, salt=self_domain.encode() + DestDomain.encode(), info=b'gn:DgEncryptor').derive(key)
+
+        key_in, key_out = _derive_bootstrap_transport_keys(
+            key,
+            peer_domain=DestDomain,
+            initiator=False,
+        )
         self._set_transport_keys(key_in, key_out)
 
         self.ready = True
@@ -152,10 +176,11 @@ class ConnectionEncryptor:
         
         key = self.eEndpoint._kdc.getKey(self.keyid) # type: ignore
 
-        self_domain = self.eEndpoint._kdc._client._domain
-        
-        key_in = HKDF(algorithm=hashes.SHA3_512(), length=32, salt=domain.encode() + self_domain.encode(), info=b'gn:DgEncryptor').derive(key)
-        key_out = HKDF(algorithm=hashes.SHA3_512(), length=32, salt=self_domain.encode() + domain.encode(), info=b'gn:DgEncryptor').derive(key)
+        key_in, key_out = _derive_bootstrap_transport_keys(
+            key,
+            peer_domain=domain,
+            initiator=True,
+        )
         self._set_transport_keys(key_in, key_out)
 
         self.ready = True
