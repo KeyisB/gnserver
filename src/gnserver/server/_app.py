@@ -526,6 +526,11 @@ class App:
             
         def quic_event_received(self, event: QuicEvent):
             if isinstance(event, HandshakeCompleted):
+                logger.debug(
+                    f'[HANDSHAKE] completed domain={self._domain!r} '
+                    f'alpn={event.alpn_protocol} resumed={event.session_resumed} '
+                    f'early_data={event.early_data_accepted}'
+                )
                 self.setDefault_max_datagram_size()
                 self._refresh_domain()
                 self._apply_gn_pq_session_root(self._domain)
@@ -537,7 +542,10 @@ class App:
             
 
             elif isinstance(event, ConnectionTerminated):
-                reason = event.reason_phrase or f"code={event.error_code}"
+                reason = (
+                    f"code={event.error_code} frame_type={event.frame_type} "
+                    f"reason={event.reason_phrase!r}"
+                )
                 self._trigger_disconnect(f"ConnectionTerminated: {reason}")
             
             

@@ -45,6 +45,11 @@ GN_PQ_CLIENT_HELLO_EXTENSION_TYPE = 0xFF80
 GN_PQ_SERVER_HELLO_EXTENSION_TYPE = 0xFF81
 
 
+def _gn_pq_log(message: str) -> None:
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{stamp}] [GN PQ] {message}")
+
+
 @dataclass(slots=True)
 class GNQuicClientSettings:
     server_domain: str
@@ -232,7 +237,15 @@ def _gn_pq_client_handle_encrypted_extensions(self: tls.Context, input_buf: Buff
     try:
         self._gn_pq_server_hello = GNPQServerHello.from_bytes(server_hello_payload)
     except Exception as exc:
+        _gn_pq_log(f"client failed to parse server hello: {type(exc).__name__}: {exc}")
         raise tls.AlertDecodeError("Invalid GN PQ server hello") from exc
+
+    _gn_pq_log(
+        "client received server hello "
+        f"server_domain={self._gn_pq_server_hello.server_certificate.name!r} "
+        f"ca={self._gn_pq_server_hello.server_certificate.center_domain!r}#"
+        f"{self._gn_pq_server_hello.server_certificate.center_key_version}"
+    )
 
 
 def _gn_pq_client_handle_finished(self: tls.Context, input_buf: Buffer, output_buf: Buffer) -> None:
@@ -265,6 +278,7 @@ def _gn_pq_client_handle_finished(self: tls.Context, input_buf: Buffer, output_b
     next_enc_key = key_schedule.derive_secret(b"c ap traffic")
 
     if self._certificate_request is None:
+        _gn_pq_log("client finished without certificate request from server")
         raise tls.AlertHandshakeFailure("GN PQ handshake requires a client certificate flight")
 
     ca_public_key = get_gn_pq_ca_public_key(
@@ -272,6 +286,11 @@ def _gn_pq_client_handle_finished(self: tls.Context, input_buf: Buffer, output_b
         server_hello.server_certificate.center_key_version,
     )
     if ca_public_key is None:
+        _gn_pq_log(
+            "client missing GN PQ CA key "
+            f"{server_hello.server_certificate.center_domain!r}#"
+            f"{server_hello.server_certificate.center_key_version}"
+        )
         raise tls.AlertBadCertificate(
             "Unknown GN PQ CA key "
             f"{server_hello.server_certificate.center_domain}"
@@ -288,10 +307,15 @@ def _gn_pq_client_handle_finished(self: tls.Context, input_buf: Buffer, output_b
             kdc_key=settings.kdc_key,
         )
     except Exception as exc:
+        _gn_pq_log(f"client handshake completion failed for {settings.server_domain!r}: {type(exc).__name__}: {exc}")
         raise tls.AlertHandshakeFailure("GN PQ client completion failed") from exc
 
     self._gn_pq_client_completion = completion
     self._gn_pq_established = completion.established
+    _gn_pq_log(
+        f"client handshake completed for {settings.server_domain!r} "
+        f"kdc_key={'set' if settings.kdc_key is not None else 'none'}"
+    )
 
     with tls.push_message(key_schedule, output_buf):
         tls.push_certificate(
@@ -347,7 +371,10 @@ def _gn_pq_server_handle_hello(
             client_hello=client_hello,
         )
     except Exception as exc:
+        _gn_pq_log(f"server handshake build failed for {settings.server_domain!r}: {type(exc).__name__}: {exc}")
         raise tls.AlertHandshakeFailure("GN PQ server handshake build failed") from exc
+
+    _gn_pq_log(f"server built handshake for {settings.server_domain!r}")
 
     original_extensions = list(self.handshake_extensions)
     original_request_certificate = self._request_client_certificate
@@ -393,9 +420,14 @@ def _gn_pq_server_handle_certificate(self: tls.Context, input_buf: Buffer, outpu
             kdc_key=settings.kdc_key,
         )
     except Exception as exc:
+        _gn_pq_log(f"server handshake completion failed for {settings.server_domain!r}: {type(exc).__name__}: {exc}")
         raise tls.AlertHandshakeFailure("GN PQ server completion failed") from exc
 
     self._gn_pq_established = established
+    _gn_pq_log(
+        f"server handshake completed for {settings.server_domain!r} "
+        f"kdc_key={'set' if settings.kdc_key is not None else 'none'}"
+    )
     self._server_expect_finished(output_buf)
 
 
