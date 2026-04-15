@@ -28,6 +28,7 @@ from ._gn_pq_handshake import (
     GNPQClientCompletion,
     GNPQClientHandshakeState,
     GNPQEstablishedState,
+    _sha3_256_hex,
     build_client_handshake,
     build_server_handshake,
     complete_client_handshake,
@@ -321,6 +322,14 @@ def extract_gn_pq_server_settings(gn_server_crt: dict) -> Optional[GNQuicServerS
     if certificate.name != server_domain:
         raise ValueError("gn_server_crt.domain must match gn_server_crt.crypto.crt.data.domain")
 
+    _gn_pq_log(
+        f"server loaded certificate domain={server_domain!r} "
+        f"ca={certificate.center_domain!r}#{certificate.center_key_version} "
+        f"sig_fp={_sha3_256_hex(certificate.signature)[:16]} "
+        f"unsigned_fp={_sha3_256_hex(certificate.unsigned_bytes())[:16]} "
+        f"unsigned_len={len(certificate.unsigned_bytes())}"
+    )
+
     kdc_key = _decode_user_friendly_bytes(kdc["key"])
 
     return GNQuicServerSettings(
@@ -503,6 +512,14 @@ def _gn_pq_client_handle_finished(self: tls.Context, input_buf: Buffer, output_b
             f"{server_hello.server_certificate.center_domain}"
             f"#{server_hello.server_certificate.center_key_version}"
         )
+
+    _gn_pq_log(
+        f"client verify ca={server_hello.server_certificate.center_domain!r}#"
+        f"{server_hello.server_certificate.center_key_version} "
+        f"ca_key_fp={_sha3_256_hex(ca_public_key)[:16]} "
+        f"ca_key_len={len(ca_public_key)} "
+        f"ca_key_head={ca_public_key[:8].hex()}"
+    )
 
     try:
         completion: GNPQClientCompletion = complete_client_handshake(

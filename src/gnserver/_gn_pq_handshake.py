@@ -11,6 +11,7 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import (
     X25519PrivateKey,
     X25519PublicKey,
 )
+from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from ._gn_pq_session import (
@@ -35,6 +36,12 @@ from .oqs import KeyEncapsulation, Signature, get_enabled_sig_mechanisms
 def _gn_pq_handshake_log(message: str) -> None:
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{stamp}] [GN PQ] {message}")
+
+
+def _sha3_256_hex(data: bytes) -> str:
+    h = hashes.Hash(hashes.SHA3_256())
+    h.update(data)
+    return h.finalize().hex()
 
 
 @dataclass(slots=True)
@@ -114,6 +121,14 @@ def issue_server_certificate(
     )
     certificate_message = build_certificate_signature_message(unsigned_certificate.unsigned_bytes())
 
+    unsigned_fp = _sha3_256_hex(unsigned_certificate.unsigned_bytes())
+    msg_fp = _sha3_256_hex(certificate_message)
+    _gn_pq_handshake_log(
+        f"issue certificate server={server_name!r} "
+        f"unsigned_fp={unsigned_fp[:16]} msg_fp={msg_fp[:16]} "
+        f"unsigned_len={len(unsigned_certificate.unsigned_bytes())}"
+    )
+
     with Signature(ca_signature_algorithm, secret_key=ca_private_key) as ca_sig:
         signature = ca_sig.sign(certificate_message)
 
@@ -171,13 +186,22 @@ def verify_server_certificate(
             expected_public_key_len, _, expected_signature_len = get_gn_pq_signature_artifact_lengths(
                 ca_signature_algorithm
             )
+            ca_key_fp = _sha3_256_hex(ca_public_key)
+            msg_fp = _sha3_256_hex(certificate_message)
+            sig_fp = _sha3_256_hex(certificate.signature)
+            unsigned_fp = _sha3_256_hex(certificate.unsigned_bytes())
             _gn_pq_handshake_log(
                 "verify server certificate failed "
                 f"server={certificate.name!r} ca={certificate.center_domain!r}#{certificate.center_key_version} "
                 f"source_data={source_data is not None} canonical_valid={canonical_valid} "
                 f"ca_key_len={len(ca_public_key)}/{expected_public_key_len} "
                 f"sig_len={len(certificate.signature)}/{expected_signature_len} "
-                f"unsigned_len={len(certificate.unsigned_bytes())}"
+                f"unsigned_len={len(certificate.unsigned_bytes())} "
+                f"ca_key_fp={ca_key_fp[:16]} "
+                f"msg_fp={msg_fp[:16]} "
+                f"sig_fp={sig_fp[:16]} "
+                f"unsigned_fp={unsigned_fp[:16]} "
+                f"ca_key_head={ca_public_key[:8].hex()}"
             )
             raise ValueError("Invalid CA signature on server certificate")
 
