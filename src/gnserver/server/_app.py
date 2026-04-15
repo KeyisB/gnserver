@@ -534,7 +534,8 @@ class App:
                 )
                 self.setDefault_max_datagram_size()
                 self._refresh_domain()
-                self._apply_gn_pq_session_root(self._domain)
+                domain = self._domain
+                asyncio.get_event_loop().call_soon(self._apply_gn_pq_session_root, domain)
 
             elif isinstance(event, StreamDataReceived):
                 request = self._feed_request_stream(event.stream_id, event.data, event.end_stream)

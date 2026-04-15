@@ -639,7 +639,8 @@ class RawQuicClient(QuicProtocolShell):
                 f'early_data={event.early_data_accepted}'
             )
             self.setDefault_max_datagram_size()
-            self._apply_gn_pq_session_root(self._QuicClient.domain)
+            domain = self._QuicClient.domain
+            asyncio.get_event_loop().call_soon(self._apply_gn_pq_session_root, domain)
             return
 
         if isinstance(event, StreamDataReceived):

@@ -105,6 +105,9 @@ class ConnectionEncryptor:
         if len(key_in) != 32 or len(key_out) != 32:
             raise ValueError('Transport keys must be 32 bytes each')
 
+        if hasattr(self, '_key_in'):
+            self._prev_key_in = self._key_in
+
         self._key_in = key_in
         self._key_out = key_out
 
@@ -236,8 +239,17 @@ class ConnectionEncryptor:
         nonce = packet[:15]
         tag = packet[-16:]
         ciphertext = packet[15:-16]
-        cipher = AES.new(self._key_in, AES.MODE_OCB, nonce=nonce, mac_len=16)
-        return cipher.decrypt_and_verify(ciphertext, tag)
+        try:
+            cipher = AES.new(self._key_in, AES.MODE_OCB, nonce=nonce, mac_len=16)
+            result = cipher.decrypt_and_verify(ciphertext, tag)
+            self._prev_key_in = None
+            return result
+        except Exception:
+            prev = getattr(self, '_prev_key_in', None)
+            if prev is not None:
+                cipher = AES.new(prev, AES.MODE_OCB, nonce=nonce, mac_len=16)
+                return cipher.decrypt_and_verify(ciphertext, tag)
+            raise
 
 
 
