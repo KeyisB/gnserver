@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime
 import os
 import time
+import traceback
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Optional
@@ -162,12 +163,27 @@ def verify_server_certificate(
     if now_timestamp > certificate.expires_at:
         raise ValueError("Server certificate expired")
 
-    certificate_message = build_certificate_signature_message(certificate.unsigned_bytes())
+    unsigned_raw = certificate.unsigned_bytes()
+    certificate_message = build_certificate_signature_message(unsigned_raw)
     source_data = getattr(certificate, "source_data", None)
     canonical_valid: Optional[bool] = None
 
+    _gn_pq_handshake_log(
+        f"verify_server_certificate start server={certificate.name!r} "
+        f"ca={certificate.center_domain!r}#{certificate.center_key_version} "
+        f"source_data={source_data is not None} "
+        f"unsigned_len={len(unsigned_raw)} "
+        f"msg_len={len(certificate_message)} msg_eq_unsigned={certificate_message == unsigned_raw} "
+        f"sig_len={len(certificate.signature)} "
+        f"ca_key_len={len(ca_public_key)} "
+        f"unsigned_head={unsigned_raw[:16].hex()} "
+        f"msg_head={certificate_message[:16].hex()} "
+        f"sig_head={certificate.signature[:16].hex()}"
+    )
+
     with Signature(ca_signature_algorithm) as ca_sig:
         source_valid = ca_sig.verify(certificate_message, certificate.signature, ca_public_key)
+        _gn_pq_handshake_log(f"verify_server_certificate source_valid={source_valid}")
 
         if not source_valid and source_data is not None:
             canonical_certificate = GNPQServerCertificate(
@@ -179,8 +195,15 @@ def verify_server_certificate(
                 signature=certificate.signature,
             )
             canonical_message = build_certificate_signature_message(canonical_certificate.unsigned_bytes())
-            if canonical_message != certificate_message:
+            canonical_eq = canonical_message == certificate_message
+            _gn_pq_handshake_log(
+                f"verify_server_certificate canonical check: "
+                f"canonical_msg_len={len(canonical_message)} canonical_eq_source={canonical_eq} "
+                f"canonical_head={canonical_message[:16].hex()}"
+            )
+            if not canonical_eq:
                 canonical_valid = ca_sig.verify(canonical_message, certificate.signature, ca_public_key)
+                _gn_pq_handshake_log(f"verify_server_certificate canonical_valid={canonical_valid}")
 
         if not source_valid:
             expected_public_key_len, _, expected_signature_len = get_gn_pq_signature_artifact_lengths(
@@ -189,14 +212,14 @@ def verify_server_certificate(
             ca_key_fp = _sha3_256_hex(ca_public_key)
             msg_fp = _sha3_256_hex(certificate_message)
             sig_fp = _sha3_256_hex(certificate.signature)
-            unsigned_fp = _sha3_256_hex(certificate.unsigned_bytes())
+            unsigned_fp = _sha3_256_hex(unsigned_raw)
             _gn_pq_handshake_log(
-                "verify server certificate failed "
+                "verify server certificate FAILED "
                 f"server={certificate.name!r} ca={certificate.center_domain!r}#{certificate.center_key_version} "
                 f"source_data={source_data is not None} canonical_valid={canonical_valid} "
                 f"ca_key_len={len(ca_public_key)}/{expected_public_key_len} "
                 f"sig_len={len(certificate.signature)}/{expected_signature_len} "
-                f"unsigned_len={len(certificate.unsigned_bytes())} "
+                f"unsigned_len={len(unsigned_raw)} "
                 f"ca_key_fp={ca_key_fp[:16]} "
                 f"msg_fp={msg_fp[:16]} "
                 f"sig_fp={sig_fp[:16]} "
@@ -319,6 +342,13 @@ def complete_client_handshake(
     now_timestamp: Optional[datetime.datetime] = None,
     kdc_key: Optional[bytes] = None,
 ) -> GNPQClientCompletion:
+    _gn_pq_handshake_log(
+        f"complete_client_handshake start domain={local_server_domain!r} "
+        f"sig_algo={server_hello.signature_algorithm!r} "
+        f"kdc_key={'present' if kdc_key else 'none'}"
+    )
+
+    _gn_pq_handshake_log("step 1: verify_server_certificate")
     verify_server_certificate(
         expected_server_domain=local_server_domain,
         certificate=server_hello.server_certificate,
@@ -326,7 +356,9 @@ def complete_client_handshake(
         ca_signature_algorithm=ca_signature_algorithm,
         now_timestamp=now_timestamp,
     )
+    _gn_pq_handshake_log("step 1: verify_server_certificate OK")
 
+    _gn_pq_handshake_log("step 2: verify server ML-DSA signature")
     signature_message = build_server_signature_message(
         local_server_domain,
         client_state.client_hello.to_bytes(),
@@ -336,13 +368,19 @@ def complete_client_handshake(
     with Signature(server_hello.signature_algorithm) as sig:
         if not sig.verify(signature_message, server_hello.signature, server_public_key):
             raise ValueError("Invalid server ML-DSA signature in server hello")
+    _gn_pq_handshake_log("step 2: verify server ML-DSA signature OK")
 
+    _gn_pq_handshake_log("step 3: X25519 key exchange")
     server_x25519_public_key = X25519PublicKey.from_public_bytes(server_hello.server_x25519_public_key)
     x25519_shared_secret = client_state.x25519_private_key.exchange(server_x25519_public_key)
+    _gn_pq_handshake_log("step 3: X25519 key exchange OK")
 
+    _gn_pq_handshake_log("step 4: ML-KEM encapsulation")
     with KeyEncapsulation(GN_PQ_KEM_ALGORITHM) as kem:
         ml_kem_ciphertext, ml_kem_shared_secret = kem.encap_secret(server_hello.server_ml_kem_public_key)
+    _gn_pq_handshake_log("step 4: ML-KEM encapsulation OK")
 
+    _gn_pq_handshake_log("step 5: derive session root")
     client_finish = GNPQClientFinish(ml_kem_ciphertext=ml_kem_ciphertext)
     transcript_hash = build_transcript_hash(
         local_server_domain,
@@ -359,6 +397,7 @@ def complete_client_handshake(
         transcript_hash=transcript_hash,
         kdc_key=kdc_key,
     )
+    _gn_pq_handshake_log("step 5: derive session root OK")
 
     established = GNPQEstablishedState(transcript_hash=transcript_hash, root64=root64)
     return GNPQClientCompletion(

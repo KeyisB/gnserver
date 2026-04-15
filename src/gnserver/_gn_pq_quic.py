@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime
 import os
+import traceback
 from dataclasses import dataclass
 from functools import partial
 from types import MethodType
@@ -531,7 +532,11 @@ def _gn_pq_client_handle_finished(self: tls.Context, input_buf: Buffer, output_b
             kdc_key=settings.kdc_key,
         )
     except Exception as exc:
-        _gn_pq_log(f"client handshake completion failed for {settings.server_domain!r}: {type(exc).__name__}: {exc}")
+        _gn_pq_log(
+            f"client handshake completion failed for {settings.server_domain!r}: "
+            f"{type(exc).__name__}: {exc}\n"
+            f"{''.join(traceback.format_exception(type(exc), exc, exc.__traceback__))}"
+        )
         raise tls.AlertHandshakeFailure("GN PQ client completion failed") from exc
 
     self._gn_pq_client_completion = completion
