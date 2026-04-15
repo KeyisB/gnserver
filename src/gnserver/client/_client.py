@@ -701,8 +701,7 @@ class RawQuicClient(QuicProtocolShell):
 
 
         elif isinstance(event, ConnectionTerminated):
-            if self.quicClient is None:
-                return
+            client_ref = self.quicClient if self.quicClient is not None else self._QuicClient
 
             try:
                 error_name = QuicErrorCode(event.error_code).name
@@ -710,7 +709,7 @@ class RawQuicClient(QuicProtocolShell):
                 error_name = 'UNKNOWN'
 
             logger.warning(
-                f'ConnectionTerminated for {self._QuicClient.domain}: '
+                f'ConnectionTerminated for {client_ref.domain}: '
                 f'code={event.error_code}({error_name}) frame_type={event.frame_type} '
                 f'reason={event.reason_phrase!r}'
             )
@@ -721,7 +720,7 @@ class RawQuicClient(QuicProtocolShell):
             
             self.stop()
             
-            asyncio.create_task(self.quicClient.disconnect())
+            asyncio.create_task(client_ref.disconnect())
 
 
 

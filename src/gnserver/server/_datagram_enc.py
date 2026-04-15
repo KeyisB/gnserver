@@ -98,6 +98,7 @@ class ConnectionEncryptor:
         self.domain: str | None = None
         self._session_root64: Optional[bytes] = None
         self.processing_lock = asyncio.Lock()
+        self.initial_send_task: Optional[asyncio.Task] = None
         self.key_fetching = False
 
     def _set_transport_keys(self, key_in: bytes, key_out: bytes) -> None:
@@ -924,8 +925,17 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
 
             if self._domain is None:
                 _prequic_log(f"sendto initial dropped: local domain is None addr={maddr} state={connectionEnc.debug_state()}")
+            elif connectionEnc.ready:
+                self._send_initial_datagram(connectionEnc, data, addr, connectionEnc.keyid)
+                return
             else:
-                self.loop.create_task(self.async_sendto(connectionEnc, data, addr))
+                if connectionEnc.initial_send_task is None or connectionEnc.initial_send_task.done():
+                    connectionEnc.initial_send_task = self.loop.create_task(self.async_sendto(connectionEnc, data, addr))
+                else:
+                    _prequic_log(
+                        f"sendto initial queued addr={maddr} reason=initial-task-running state={connectionEnc.debug_state()}"
+                    )
+                    connectionEnc.not_ready_queue.put_nowait((data, addr))
                 return
 
         if not connectionEnc.ready:
@@ -954,25 +964,8 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
 
         self.transport.sendMapped(b0 + enc, addr)
 
-    async def async_sendto(self, connectionEnc: 'ConnectionEncryptor', data: bytes, addr):
+    def _send_initial_datagram(self, connectionEnc: 'ConnectionEncryptor', data: bytes, addr, keyid) -> None:
         maddr = self.from_addr_to_maddr(addr)
-        _prequic_log(
-            f"async_sendto start addr={maddr} local_domain={self._domain!r} default_enc={self._default_encryption_type} "
-            f"state={connectionEnc.debug_state()}"
-        )
-        if not connectionEnc.ready:
-            restored = False
-            if self._default_encryption_type != 0 and self._domain is not None:
-                restored = self._restore_connection_from_inactive_domain(connectionEnc, cast(str, self._domain))
-
-            if restored:
-                keyid = connectionEnc.keyid
-                _prequic_log(f"async_sendto restored inactive session addr={maddr} state={connectionEnc.debug_state()}")
-            else:
-                keyid = await connectionEnc.initByDomain(self._default_encryption_type, cast(str, self._domain))
-        else:
-            keyid = connectionEnc.keyid
-
         effective_encryption_type = connectionEnc.encryption_type
         p = self.construct_initial(effective_encryption_type, keyid) # type: ignore
         _prequic_log(
@@ -991,17 +984,41 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
                 return
         else:
             enc = data
-        
+
         dg = p + enc
         _prequic_log(f"async_sendto sendMapped addr={maddr} datagram_len={len(dg)} state={connectionEnc.debug_state()}")
-        
         self.transport.sendMapped(dg, addr)
 
+    async def async_sendto(self, connectionEnc: 'ConnectionEncryptor', data: bytes, addr):
+        maddr = self.from_addr_to_maddr(addr)
+        _prequic_log(
+            f"async_sendto start addr={maddr} local_domain={self._domain!r} default_enc={self._default_encryption_type} "
+            f"state={connectionEnc.debug_state()}"
+        )
+        current_task = asyncio.current_task()
+        try:
+            if not connectionEnc.ready:
+                restored = False
+                if self._default_encryption_type != 0 and self._domain is not None:
+                    restored = self._restore_connection_from_inactive_domain(connectionEnc, cast(str, self._domain))
 
-        if not connectionEnc.not_ready_queue.empty():
-            while not connectionEnc.not_ready_queue.empty():
-                data, addr = connectionEnc.not_ready_queue.get_nowait()
-                self.sendto(data, addr)
+                if restored:
+                    keyid = connectionEnc.keyid
+                    _prequic_log(f"async_sendto restored inactive session addr={maddr} state={connectionEnc.debug_state()}")
+                else:
+                    keyid = await connectionEnc.initByDomain(self._default_encryption_type, cast(str, self._domain))
+            else:
+                keyid = connectionEnc.keyid
+
+            self._send_initial_datagram(connectionEnc, data, addr, keyid)
+
+            if not connectionEnc.not_ready_queue.empty():
+                while not connectionEnc.not_ready_queue.empty():
+                    data, addr = connectionEnc.not_ready_queue.get_nowait()
+                    self.sendto(data, addr)
+        finally:
+            if connectionEnc.initial_send_task is current_task:
+                connectionEnc.initial_send_task = None
         
 
     async def _handle_datagram(self, data: bytes, addr):

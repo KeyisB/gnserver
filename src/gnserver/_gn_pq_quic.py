@@ -234,7 +234,12 @@ def _find_extension(extensions: Optional[list[tuple[int, bytes]]], extension_typ
 
 
 def _gn_pq_client_handle_encrypted_extensions(self: tls.Context, input_buf: Buffer) -> None:
-    tls.Context._client_handle_encrypted_extensions(self, input_buf)
+    _gn_pq_log("client handle_encrypted_extensions start")
+    try:
+        tls.Context._client_handle_encrypted_extensions(self, input_buf)
+    except Exception as exc:
+        _gn_pq_log(f"client handle_encrypted_extensions base failed: {type(exc).__name__}: {exc}")
+        raise
     _gn_pq_log("client handle_encrypted_extensions entered")
 
     settings = getattr(self, "_gn_pq_client_settings", None)
