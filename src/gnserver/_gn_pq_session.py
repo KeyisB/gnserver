@@ -108,6 +108,7 @@ class GNPQServerCertificate:
     public_keys: dict[str, bytes]
     expires_at: datetime.datetime
     signature: bytes
+    source_data: Optional[dict[str, Any]] = None
 
     def __post_init__(self) -> None:
         if not self.center_domain:
@@ -138,6 +139,9 @@ class GNPQServerCertificate:
             raise TypeError("signature must be bytes")
         self.signature = bytes(self.signature)
 
+        if self.source_data is not None and not isinstance(self.source_data, dict):
+            raise TypeError("source_data must be dict")
+
     def get_public_key(self, algorithm: str) -> bytes:
         if algorithm not in self.public_keys:
             raise ValueError(f"Server certificate does not contain algorithm {algorithm!r}")
@@ -156,11 +160,13 @@ class GNPQServerCertificate:
         }
 
     def unsigned_bytes(self) -> bytes:
-        return serialize(self.data_dict())
+        data = self.source_data if self.source_data is not None else self.data_dict()
+        return serialize(data)
 
     def to_bytes(self) -> bytes:
+        data = self.source_data if self.source_data is not None else self.data_dict()
         return serialize({
-            "data": self.data_dict(),
+            "data": data,
             "sign": self.signature,
         })
 
@@ -212,6 +218,7 @@ class GNPQServerCertificate:
             public_keys=public_keys,
             expires_at=expires_at,
             signature=bytes(signature),
+            source_data=dict(data),
         )
 
     @classmethod

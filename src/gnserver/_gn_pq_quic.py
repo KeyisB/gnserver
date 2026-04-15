@@ -32,6 +32,8 @@ from ._gn_pq_handshake import (
     build_server_handshake,
     complete_client_handshake,
     complete_server_handshake,
+    get_default_gn_pq_signature_algorithm_name,
+    get_gn_pq_signature_artifact_lengths,
     normalize_gn_pq_signature_algorithm_name,
 )
 from ._gn_pq_session import (
@@ -148,6 +150,29 @@ def _decode_user_friendly_bytes(value: Any) -> bytes:
     raise TypeError(f"Unsupported bytes value type: {type(value)!r}")
 
 
+def _decode_fixed_length_bytes(
+    value: Any,
+    *,
+    expected_length: int,
+    field_name: str,
+) -> bytes:
+    data = _decode_user_friendly_bytes(value)
+
+    if len(data) == expected_length:
+        return data
+    if len(data) > expected_length:
+        raise ValueError(f"{field_name} length must be <= {expected_length} bytes")
+
+    if isinstance(value, str):
+        padded = (b"\x00" * (expected_length - len(data))) + data
+        _gn_pq_log(
+            f"decoded {field_name} shorter than expected ({len(data)}<{expected_length}), left-padding zeros"
+        )
+        return padded
+
+    raise ValueError(f"{field_name} length must be exactly {expected_length} bytes")
+
+
 def _parse_crt_public_keys(crt_data: Any) -> dict[str, bytes]:
     if not isinstance(crt_data, dict):
         raise ValueError("gn_server_crt.crypto.crt.data must be a dict")
@@ -165,8 +190,13 @@ def _parse_crt_public_keys(crt_data: Any) -> dict[str, bytes]:
         if "pub" not in algorithm_data:
             raise ValueError("gn_server_crt.crypto.crt.data.algs item must include pub")
 
-        public_keys[normalize_gn_pq_signature_algorithm_name(algorithm_name)] = _decode_user_friendly_bytes(
-            algorithm_data["pub"]
+        normalized_algorithm = normalize_gn_pq_signature_algorithm_name(algorithm_name)
+        public_key_length, _, _ = get_gn_pq_signature_artifact_lengths(normalized_algorithm)
+
+        public_keys[normalized_algorithm] = _decode_fixed_length_bytes(
+            algorithm_data["pub"],
+            expected_length=public_key_length,
+            field_name=f"gn_server_crt.crypto.crt.data.algs[{algorithm_name!r}].pub",
         )
 
     return public_keys
@@ -193,8 +223,13 @@ def _parse_crt_private_keys(crt_container: Any) -> dict[str, bytes]:
         if "priv" not in algorithm_data:
             raise ValueError("gn_server_crt.crypto.crt.priv.algs item must include priv")
 
-        private_keys[normalize_gn_pq_signature_algorithm_name(algorithm_name)] = _decode_user_friendly_bytes(
-            algorithm_data["priv"]
+        normalized_algorithm = normalize_gn_pq_signature_algorithm_name(algorithm_name)
+        _, private_key_length, _ = get_gn_pq_signature_artifact_lengths(normalized_algorithm)
+
+        private_keys[normalized_algorithm] = _decode_fixed_length_bytes(
+            algorithm_data["priv"],
+            expected_length=private_key_length,
+            field_name=f"gn_server_crt.crypto.crt.priv.algs[{algorithm_name!r}].priv",
         )
 
     return private_keys
@@ -226,13 +261,22 @@ def _parse_server_certificate(crt_container: Any) -> GNPQServerCertificate:
     if not isinstance(expires_at, datetime.datetime):
         raise ValueError("gn_server_crt.crypto.crt.data.exp must be datetime.datetime")
 
+    _, _, signature_length = get_gn_pq_signature_artifact_lengths(
+        get_default_gn_pq_signature_algorithm_name()
+    )
+
     return GNPQServerCertificate(
         center_domain=center_domain,
         center_key_version=center_key_version,
         name=server_domain,
         public_keys=_parse_crt_public_keys(crt_data),
         expires_at=expires_at,
-        signature=_decode_user_friendly_bytes(signature),
+        signature=_decode_fixed_length_bytes(
+            signature,
+            expected_length=signature_length,
+            field_name="gn_server_crt.crypto.crt.sign",
+        ),
+        source_data=dict(crt_data),
     )
 
 

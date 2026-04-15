@@ -4,6 +4,7 @@ import datetime
 import os
 import time
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Optional
 
 from cryptography.hazmat.primitives.asymmetric.x25519 import (
@@ -29,6 +30,11 @@ from ._gn_pq_session import (
     verify_commit_payload,
 )
 from .oqs import KeyEncapsulation, Signature, get_enabled_sig_mechanisms
+
+
+def _gn_pq_handshake_log(message: str) -> None:
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{stamp}] [GN PQ] {message}")
 
 
 @dataclass(slots=True)
@@ -71,6 +77,17 @@ def normalize_gn_pq_signature_algorithm_name(algorithm: str) -> str:
 
 def get_default_gn_pq_signature_algorithm_name() -> str:
     return normalize_gn_pq_signature_algorithm_name(GN_PQ_SIGNATURE_ALGORITHM)
+
+
+@lru_cache(maxsize=None)
+def get_gn_pq_signature_artifact_lengths(algorithm: str) -> tuple[int, int, int]:
+    normalized_algorithm = normalize_gn_pq_signature_algorithm_name(algorithm)
+    with Signature(normalized_algorithm) as sig:
+        return (
+            int(sig.details["length_public_key"]),
+            int(sig.details["length_secret_key"]),
+            int(sig.details["length_signature"]),
+        )
 
 
 def issue_server_certificate(
@@ -131,8 +148,37 @@ def verify_server_certificate(
         raise ValueError("Server certificate expired")
 
     certificate_message = build_certificate_signature_message(certificate.unsigned_bytes())
+    source_data = getattr(certificate, "source_data", None)
+    canonical_valid: Optional[bool] = None
+
     with Signature(ca_signature_algorithm) as ca_sig:
-        if not ca_sig.verify(certificate_message, certificate.signature, ca_public_key):
+        source_valid = ca_sig.verify(certificate_message, certificate.signature, ca_public_key)
+
+        if not source_valid and source_data is not None:
+            canonical_certificate = GNPQServerCertificate(
+                center_domain=certificate.center_domain,
+                center_key_version=certificate.center_key_version,
+                name=certificate.name,
+                public_keys=certificate.public_keys,
+                expires_at=certificate.expires_at,
+                signature=certificate.signature,
+            )
+            canonical_message = build_certificate_signature_message(canonical_certificate.unsigned_bytes())
+            if canonical_message != certificate_message:
+                canonical_valid = ca_sig.verify(canonical_message, certificate.signature, ca_public_key)
+
+        if not source_valid:
+            expected_public_key_len, _, expected_signature_len = get_gn_pq_signature_artifact_lengths(
+                ca_signature_algorithm
+            )
+            _gn_pq_handshake_log(
+                "verify server certificate failed "
+                f"server={certificate.name!r} ca={certificate.center_domain!r}#{certificate.center_key_version} "
+                f"source_data={source_data is not None} canonical_valid={canonical_valid} "
+                f"ca_key_len={len(ca_public_key)}/{expected_public_key_len} "
+                f"sig_len={len(certificate.signature)}/{expected_signature_len} "
+                f"unsigned_len={len(certificate.unsigned_bytes())}"
+            )
             raise ValueError("Invalid CA signature on server certificate")
 
 
