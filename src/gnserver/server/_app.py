@@ -851,6 +851,8 @@ class App:
                 )
 
                 self._datagramEndpoint = DatagramEndpoint(quic_server, self.client._kdc, dEPConfig=self.DEPConfig)
+                self._datagramEndpoint._domain = domain
+
 
                 loop = asyncio.get_event_loop()
 

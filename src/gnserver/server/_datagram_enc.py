@@ -47,6 +47,11 @@ for name in targets:
         m.__dict__["SMALLEST_MAX_DATAGRAM_SIZE"] = NEW_SIZE
 
 
+def _prequic_log(message: str) -> None:
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+    print(f"[{stamp}] [GN PREQUIC] {message}")
+
+
 
 def is_quic_initial(b0: int) -> bool:
     return (b0 & 0xF0) == 0xC0
@@ -109,6 +114,17 @@ class ConnectionEncryptor:
         self._set_transport_keys(key_in, key_out)
         self._session_root64 = root64
 
+    def hasTransportKeys(self) -> bool:
+        return hasattr(self, '_key_in') and hasattr(self, '_key_out')
+
+    def debug_state(self) -> str:
+        return (
+            f"ready={self.ready} enc_type={self.encryption_type} keyid={self.keyid} "
+            f"domain={self.domain!r} has_keys={self.hasTransportKeys()} "
+            f"session_root={'set' if self._session_root64 is not None else 'none'} "
+            f"queue={self.not_ready_queue.qsize()} key_fetching={self.key_fetching}"
+        )
+
     def restoreInactiveSession(
         self,
         *,
@@ -147,6 +163,10 @@ class ConnectionEncryptor:
 
         self.ready = True
         self.domain = DestDomain
+        _prequic_log(
+            f"initByKeyid success local_domain={self.eEndpoint._domain!r} peer_domain={DestDomain!r} "
+            f"state={self.debug_state()}"
+        )
         return DestDomain
 
     async def initRaw(self):
@@ -154,6 +174,7 @@ class ConnectionEncryptor:
         self.keyid = (0, 0)
         self._session_root64 = None
         self.ready = True
+        _prequic_log(f"initRaw success local_domain={self.eEndpoint._domain!r} state={self.debug_state()}")
 
     
     async def initByDomain(self, encryption_type: int, domain: str) -> tuple[int, int]:
@@ -184,6 +205,10 @@ class ConnectionEncryptor:
 
         self.ready = True
         self.domain = domain
+        _prequic_log(
+            f"initByDomain success local_domain={self.eEndpoint._domain!r} peer_domain={domain!r} "
+            f"state={self.debug_state()}"
+        )
         return self.keyid
 
 
@@ -790,14 +815,19 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
         connectionEnc = self.getDgEnc(maddr)
 
         if is_quic_initial(data[0]): # init соеденения
+            _prequic_log(
+                f"sendto initial addr={maddr} local_domain={self._domain!r} "
+                f"default_enc={self._default_encryption_type} state={connectionEnc.debug_state()}"
+            )
 
             if self._domain is None:
-                print('Server init with None domain. It`s client')
+                _prequic_log(f"sendto initial dropped: local domain is None addr={maddr} state={connectionEnc.debug_state()}")
             else:
                 self.loop.create_task(self.async_sendto(connectionEnc, data, addr))
                 return
 
         if not connectionEnc.ready:
+            _prequic_log(f"sendto queued addr={maddr} reason=not-ready state={connectionEnc.debug_state()}")
             connectionEnc.not_ready_queue.put_nowait((data, addr))
             return
         
@@ -808,7 +838,10 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
             try:
                 enc = connectionEnc.encrypt(data)
             except Exception:
-                print("GN Prequic: UPD Decryption error")
+                _prequic_log(
+                    f"sendto payload encryption failed addr={maddr} state={connectionEnc.debug_state()} "
+                    f"trace={traceback.format_exc()}"
+                )
                 return
         else:
             enc = data
@@ -816,6 +849,11 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
         self.transport.sendMapped(b0 + enc, addr)
 
     async def async_sendto(self, connectionEnc: 'ConnectionEncryptor', data: bytes, addr):
+        maddr = self.from_addr_to_maddr(addr)
+        _prequic_log(
+            f"async_sendto start addr={maddr} local_domain={self._domain!r} default_enc={self._default_encryption_type} "
+            f"state={connectionEnc.debug_state()}"
+        )
         if not connectionEnc.ready:
             restored = False
             if self._default_encryption_type != 0 and self._domain is not None:
@@ -823,23 +861,33 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
 
             if restored:
                 keyid = connectionEnc.keyid
+                _prequic_log(f"async_sendto restored inactive session addr={maddr} state={connectionEnc.debug_state()}")
             else:
                 keyid = await connectionEnc.initByDomain(self._default_encryption_type, cast(str, self._domain))
         else:
             keyid = connectionEnc.keyid
 
-        p = self.construct_initial(self._default_encryption_type, keyid) # type: ignore
+        effective_encryption_type = connectionEnc.encryption_type
+        p = self.construct_initial(effective_encryption_type, keyid) # type: ignore
+        _prequic_log(
+            f"async_sendto prepared initial addr={maddr} effective_enc={effective_encryption_type} keyid={keyid} "
+            f"state={connectionEnc.debug_state()}"
+        )
 
-        if self._default_encryption_type != 0:
+        if effective_encryption_type != 0:
             try:
                 enc = connectionEnc.encrypt(data)
             except Exception:
-                print("GN Prequic: UPD Encryption error")
+                _prequic_log(
+                    f"async_sendto initial encryption failed addr={maddr} effective_enc={effective_encryption_type} "
+                    f"state={connectionEnc.debug_state()} trace={traceback.format_exc()}"
+                )
                 return
         else:
             enc = data
         
         dg = p + enc
+        _prequic_log(f"async_sendto sendMapped addr={maddr} datagram_len={len(dg)} state={connectionEnc.debug_state()}")
         
         self.transport.sendMapped(dg, addr)
 
@@ -879,6 +927,11 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
                     keyType = data[2]
                     key_id = int.from_bytes(data[3:10], 'big')
                     incoming_keyid = (keyType, key_id)
+
+                _prequic_log(
+                    f"handle initial addr={maddr} incoming_enc={encryption_type} incoming_keyid={incoming_keyid} "
+                    f"local_domain={self._domain!r} state_before={connectionEnc.debug_state()}"
+                )
 
                 if not connectionEnc.ready:
                     if encryption_type != 0: # encrypted
@@ -922,6 +975,9 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
 
                     if d is not None:
                         connectionEnc.domain = d
+                _prequic_log(
+                    f"handle initial done addr={maddr} resolved_domain={d!r} state_after={connectionEnc.debug_state()}"
+                )
         else:
             datagram = data[1:]
 
