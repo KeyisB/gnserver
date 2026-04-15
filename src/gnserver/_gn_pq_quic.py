@@ -614,6 +614,21 @@ def _gn_pq_server_handle_hello(
 
     self._gn_pq_server_state = server_state
 
+    # --- resolve per-peer KDC key via KDCObject ---
+    _quic_conn: GNQuicConnection = self._gn_pq_quic_connection
+    _dep = _quic_conn._gn_pq_datagram_endpoint
+    if _dep is not None and _quic_conn._network_paths:
+        from .server._datagram_enc import DatagramEndpoint as _DEP
+        _maddr = _DEP.from_addr_to_maddr(_quic_conn._network_paths[0].addr)
+        _cEnc = _dep.x_maddr_dgEnc.get(_maddr)
+        if _cEnc is not None and _cEnc.keyid != (0, 0):
+            self._gn_pq_peer_kdc_key = _dep._kdc.getKey(_cEnc.keyid)
+            _gn_pq_log(
+                f"server resolved peer kdc key keyid={_cEnc.keyid} "
+                f"domain={_cEnc.domain!r}"
+            )
+    # -----------------------------------------------
+
     peer_hello = tls.pull_client_hello(input_buf)
 
     cipher_suite = tls.negotiate(
@@ -888,7 +903,7 @@ def _gn_pq_server_handle_certificate(self: tls.Context, input_buf: Buffer, outpu
             f"ciphertext_len={len(client_finish.ml_kem_ciphertext)}"
         )
 
-        kdc_key = _resolve_server_peer_kdc_key(self, settings)
+        kdc_key = self._gn_pq_peer_kdc_key
 
         established: GNPQEstablishedState = complete_server_handshake(
             local_server_domain=settings.server_domain,
@@ -912,62 +927,6 @@ def _gn_pq_server_handle_certificate(self: tls.Context, input_buf: Buffer, outpu
     )
 
 
-def _resolve_server_peer_kdc_key(
-    tls_context: tls.Context,
-    settings: GNQuicServerSettings,
-) -> Optional[bytes]:
-    """Resolve the per-peer KDC shared key for the GN PQ handshake.
-
-    Uses the KDCObject from the DatagramEndpoint to look up the shared key
-    by the ConnectionEncryptor's keyid.  Falls back to ``settings.kdc_key``
-    (the static config key) when the DatagramEndpoint is unavailable.
-    """
-    from .server._datagram_enc import DatagramEndpoint  # avoid circular at module level
-
-    quic: Optional[GNQuicConnection] = getattr(tls_context, "_gn_pq_quic_connection", None)
-    if quic is None:
-        _gn_pq_log("resolve_server_peer_kdc_key: no quic connection ref, fallback to settings")
-        return settings.kdc_key
-
-    dep: Optional[DatagramEndpoint] = quic._gn_pq_datagram_endpoint
-    if dep is None:
-        _gn_pq_log("resolve_server_peer_kdc_key: no datagram endpoint, fallback to settings")
-        return settings.kdc_key
-
-    network_paths = getattr(quic, "_network_paths", None)
-    if not network_paths:
-        _gn_pq_log("resolve_server_peer_kdc_key: no network paths, fallback to settings")
-        return settings.kdc_key
-
-    maddr = DatagramEndpoint.from_addr_to_maddr(network_paths[0].addr)
-    connectionEnc = dep.x_maddr_dgEnc.get(maddr)
-    if connectionEnc is None or connectionEnc.keyid == (0, 0):
-        _gn_pq_log(
-            f"resolve_server_peer_kdc_key: no connectionEnc or zero keyid "
-            f"maddr={maddr} enc={connectionEnc is not None}, fallback to settings"
-        )
-        return settings.kdc_key
-
-    try:
-        peer_key = dep._kdc.getKey(connectionEnc.keyid)
-    except Exception as exc:
-        _gn_pq_log(
-            f"resolve_server_peer_kdc_key: kdc.getKey({connectionEnc.keyid}) failed: "
-            f"{type(exc).__name__}: {exc}, fallback to settings"
-        )
-        return settings.kdc_key
-
-    if peer_key is None:
-        _gn_pq_log("resolve_server_peer_kdc_key: kdc.getKey returned None, fallback to settings")
-        return settings.kdc_key
-
-    _gn_pq_log(
-        f"resolve_server_peer_kdc_key: using per-peer key "
-        f"keyid={connectionEnc.keyid} domain={connectionEnc.domain!r}"
-    )
-    return peer_key
-
-
 def _install_gn_pq_tls_hooks(
     context: tls.Context,
     *,
@@ -983,6 +942,7 @@ def _install_gn_pq_tls_hooks(
     context._gn_pq_established = None
     context._gn_pq_client_completion = None
     context._gn_pq_quic_connection = quic_connection
+    context._gn_pq_peer_kdc_key = None
 
     _gn_pq_log(
         "install tls hooks "
