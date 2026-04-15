@@ -888,15 +888,7 @@ def _gn_pq_server_handle_certificate(self: tls.Context, input_buf: Buffer, outpu
             f"ciphertext_len={len(client_finish.ml_kem_ciphertext)}"
         )
 
-        kdc_key = settings.kdc_key
-        kdc_key_fetcher = getattr(self, "_gn_pq_server_kdc_key_fetcher", None)
-        if kdc_key_fetcher is not None:
-            fetched_key = kdc_key_fetcher()
-            if fetched_key is not None:
-                kdc_key = fetched_key
-                _gn_pq_log("server handle_certificate using per-peer kdc_key from fetcher")
-            else:
-                _gn_pq_log("server handle_certificate fetcher returned None, using settings kdc_key")
+        kdc_key = _resolve_server_peer_kdc_key(self, settings)
 
         established: GNPQEstablishedState = complete_server_handshake(
             local_server_domain=settings.server_domain,
@@ -920,12 +912,68 @@ def _gn_pq_server_handle_certificate(self: tls.Context, input_buf: Buffer, outpu
     )
 
 
+def _resolve_server_peer_kdc_key(
+    tls_context: tls.Context,
+    settings: GNQuicServerSettings,
+) -> Optional[bytes]:
+    """Resolve the per-peer KDC shared key for the GN PQ handshake.
+
+    Uses the KDCObject from the DatagramEndpoint to look up the shared key
+    by the ConnectionEncryptor's keyid.  Falls back to ``settings.kdc_key``
+    (the static config key) when the DatagramEndpoint is unavailable.
+    """
+    from .server._datagram_enc import DatagramEndpoint  # avoid circular at module level
+
+    quic: Optional[GNQuicConnection] = getattr(tls_context, "_gn_pq_quic_connection", None)
+    if quic is None:
+        _gn_pq_log("resolve_server_peer_kdc_key: no quic connection ref, fallback to settings")
+        return settings.kdc_key
+
+    dep: Optional[DatagramEndpoint] = quic._gn_pq_datagram_endpoint
+    if dep is None:
+        _gn_pq_log("resolve_server_peer_kdc_key: no datagram endpoint, fallback to settings")
+        return settings.kdc_key
+
+    network_paths = getattr(quic, "_network_paths", None)
+    if not network_paths:
+        _gn_pq_log("resolve_server_peer_kdc_key: no network paths, fallback to settings")
+        return settings.kdc_key
+
+    maddr = DatagramEndpoint.from_addr_to_maddr(network_paths[0].addr)
+    connectionEnc = dep.x_maddr_dgEnc.get(maddr)
+    if connectionEnc is None or connectionEnc.keyid == (0, 0):
+        _gn_pq_log(
+            f"resolve_server_peer_kdc_key: no connectionEnc or zero keyid "
+            f"maddr={maddr} enc={connectionEnc is not None}, fallback to settings"
+        )
+        return settings.kdc_key
+
+    try:
+        peer_key = dep._kdc.getKey(connectionEnc.keyid)
+    except Exception as exc:
+        _gn_pq_log(
+            f"resolve_server_peer_kdc_key: kdc.getKey({connectionEnc.keyid}) failed: "
+            f"{type(exc).__name__}: {exc}, fallback to settings"
+        )
+        return settings.kdc_key
+
+    if peer_key is None:
+        _gn_pq_log("resolve_server_peer_kdc_key: kdc.getKey returned None, fallback to settings")
+        return settings.kdc_key
+
+    _gn_pq_log(
+        f"resolve_server_peer_kdc_key: using per-peer key "
+        f"keyid={connectionEnc.keyid} domain={connectionEnc.domain!r}"
+    )
+    return peer_key
+
+
 def _install_gn_pq_tls_hooks(
     context: tls.Context,
     *,
+    quic_connection: 'GNQuicConnection',
     client_settings: Optional[GNQuicClientSettings],
     server_settings: Optional[GNQuicServerSettings],
-    server_kdc_key_fetcher: Optional[Callable[[], Optional[bytes]]] = None,
 ) -> None:
     context._gn_pq_client_settings = client_settings
     context._gn_pq_server_settings = server_settings
@@ -934,7 +982,7 @@ def _install_gn_pq_tls_hooks(
     context._gn_pq_server_hello = None
     context._gn_pq_established = None
     context._gn_pq_client_completion = None
-    context._gn_pq_server_kdc_key_fetcher = server_kdc_key_fetcher
+    context._gn_pq_quic_connection = quic_connection
 
     _gn_pq_log(
         "install tls hooks "
@@ -966,6 +1014,7 @@ class GNQuicConnection(QuicConnection):
     ) -> None:
         self._gn_pq_client_settings = gn_pq_client_settings
         self._gn_pq_server_settings = gn_pq_server_settings
+        self._gn_pq_datagram_endpoint = None
         super().__init__(
             configuration=configuration,
             original_destination_connection_id=original_destination_connection_id,
@@ -994,9 +1043,9 @@ class GNQuicConnection(QuicConnection):
 
         _install_gn_pq_tls_hooks(
             self.tls,
+            quic_connection=self,
             client_settings=self._gn_pq_client_settings,
             server_settings=self._gn_pq_server_settings,
-            server_kdc_key_fetcher=getattr(self, "_gn_pq_server_kdc_key_fetcher", None),
         )
 
         if self._gn_pq_client_settings is not None:
