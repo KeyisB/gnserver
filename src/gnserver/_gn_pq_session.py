@@ -9,7 +9,18 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 GN_PQ_KEM_ALGORITHM: Final[str] = "ML-KEM-1024"
-GN_PQ_SIGNATURE_ALGORITHM: Final[str] = "Dilithium5"
+GN_PQ_SIGNATURE_ALGORITHM: Final[str] = "ml-dsa-87"
+
+_ALGORITHM_NAME_ALIASES: Final[dict[str, str]] = {
+    "dilithium2": "ml-dsa-44",
+    "dilithium3": "ml-dsa-65",
+    "dilithium5": "ml-dsa-87",
+}
+
+
+def _normalize_algorithm_name(name: str) -> str:
+    folded = name.casefold()
+    return _ALGORITHM_NAME_ALIASES.get(folded, folded)
 
 GN_NONCE_LEN: Final[int] = 32
 GN_X25519_PUBLIC_KEY_LEN: Final[int] = 32
@@ -129,7 +140,7 @@ class GNPQServerCertificate:
             public_key_bytes = bytes(public_key)
             if not public_key_bytes:
                 raise ValueError("public key must not be empty")
-            normalized_public_keys[str(algorithm)] = public_key_bytes
+            normalized_public_keys[_normalize_algorithm_name(str(algorithm))] = public_key_bytes
         if not normalized_public_keys:
             raise ValueError("public_keys must not be empty")
         self.public_keys = normalized_public_keys
@@ -142,9 +153,10 @@ class GNPQServerCertificate:
             raise TypeError("source_data must be dict")
 
     def get_public_key(self, algorithm: str) -> bytes:
-        if algorithm not in self.public_keys:
+        normalized = _normalize_algorithm_name(algorithm)
+        if normalized not in self.public_keys:
             raise ValueError(f"Server certificate does not contain algorithm {algorithm!r}")
-        return self.public_keys[algorithm]
+        return self.public_keys[normalized]
 
     def data_dict(self) -> dict[str, Any]:
         return {

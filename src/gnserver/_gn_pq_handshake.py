@@ -74,12 +74,12 @@ class GNPQCertifiedServerIdentity:
 def normalize_gn_pq_signature_algorithm_name(algorithm: str) -> str:
     try:
         with Signature(algorithm) as sig:
-            return str(sig.details["name"])
+            return str(sig.details["name"]).casefold()
     except Exception:
         algorithm_cf = algorithm.casefold()
         for candidate in get_enabled_sig_mechanisms():
             if candidate.casefold() == algorithm_cf:
-                return candidate
+                return candidate.casefold()
         raise
 
 
