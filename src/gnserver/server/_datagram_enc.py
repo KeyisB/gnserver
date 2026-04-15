@@ -55,26 +55,23 @@ def is_quic_initial(b0: int) -> bool:
 def _derive_bootstrap_transport_keys(
     shared_key: bytes,
     *,
+    local_domain: str,
     peer_domain: str,
-    initiator: bool,
 ) -> tuple[bytes, bytes]:
-    client_to_server = HKDF(
+    key_in = HKDF(
         algorithm=hashes.SHA3_512(),
         length=32,
-        salt=peer_domain.encode() + b':c2s',
+        salt=peer_domain.encode() + local_domain.encode(),
         info=b'gn:DgEncryptor',
     ).derive(shared_key)
-    server_to_client = HKDF(
+    key_out = HKDF(
         algorithm=hashes.SHA3_512(),
         length=32,
-        salt=peer_domain.encode() + b':s2c',
+        salt=local_domain.encode() + peer_domain.encode(),
         info=b'gn:DgEncryptor',
     ).derive(shared_key)
 
-    if initiator:
-        return server_to_client, client_to_server
-
-    return client_to_server, server_to_client
+    return key_in, key_out
 
 
 class ConnectionEncryptor:
@@ -140,10 +137,11 @@ class ConnectionEncryptor:
         if DestDomain is None:
             raise AllGNFastCommands.transport.KeyDomainNotFound({'keyid': keyid})
 
+        self_domain = self.eEndpoint._kdc._client._domain
         key_in, key_out = _derive_bootstrap_transport_keys(
             key,
+            local_domain=self_domain,
             peer_domain=DestDomain,
-            initiator=False,
         )
         self._set_transport_keys(key_in, key_out)
 
@@ -176,10 +174,11 @@ class ConnectionEncryptor:
         
         key = self.eEndpoint._kdc.getKey(self.keyid) # type: ignore
 
+        self_domain = self.eEndpoint._kdc._client._domain
         key_in, key_out = _derive_bootstrap_transport_keys(
             key,
+            local_domain=self_domain,
             peer_domain=domain,
-            initiator=True,
         )
         self._set_transport_keys(key_in, key_out)
 
