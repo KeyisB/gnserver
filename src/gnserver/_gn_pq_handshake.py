@@ -446,11 +446,14 @@ def complete_client_handshake(
 
     _gn_pq_handshake_log("step 5: derive session root")
     client_finish = GNPQClientFinish(ml_kem_ciphertext=ml_kem_ciphertext)
+    ch_bytes = client_state.client_hello.to_bytes()
+    sh_bytes = server_hello.to_bytes()
+    cf_bytes = client_finish.to_bytes()
     transcript_hash = build_transcript_hash(
         local_server_domain,
-        client_state.client_hello.to_bytes(),
-        server_hello.to_bytes(),
-        client_finish.to_bytes(),
+        ch_bytes,
+        sh_bytes,
+        cf_bytes,
     )
     root64 = derive_session_root64(
         local_server_domain=local_server_domain,
@@ -461,7 +464,19 @@ def complete_client_handshake(
         transcript_hash=transcript_hash,
         kdc_key=kdc_key,
     )
-    _gn_pq_handshake_log("step 5: derive session root OK")
+    import hashlib
+    _gn_pq_handshake_log(
+        f"step 5: derive session root OK "
+        f"transcript_fp={hashlib.sha3_256(transcript_hash).hexdigest()[:16]} "
+        f"root64_fp={hashlib.sha3_256(root64).hexdigest()[:16]} "
+        f"ch_len={len(ch_bytes)} sh_len={len(sh_bytes)} cf_len={len(cf_bytes)} "
+        f"ch_fp={hashlib.sha3_256(ch_bytes).hexdigest()[:16]} "
+        f"sh_fp={hashlib.sha3_256(sh_bytes).hexdigest()[:16]} "
+        f"cf_fp={hashlib.sha3_256(cf_bytes).hexdigest()[:16]} "
+        f"mlkem_ss_fp={hashlib.sha3_256(ml_kem_shared_secret).hexdigest()[:16]} "
+        f"x25519_ss_fp={hashlib.sha3_256(x25519_shared_secret).hexdigest()[:16]} "
+        f"kdc_key_fp={hashlib.sha3_256(kdc_key).hexdigest()[:16] if kdc_key else 'none'}"
+    )
 
     established = GNPQEstablishedState(transcript_hash=transcript_hash, root64=root64)
     return GNPQClientCompletion(
@@ -484,11 +499,14 @@ def complete_server_handshake(
     ) as kem:
         ml_kem_shared_secret = kem.decap_secret(client_finish.ml_kem_ciphertext)
 
+    ch_bytes = server_state.client_hello.to_bytes()
+    sh_bytes = server_state.server_hello.to_bytes()
+    cf_bytes = client_finish.to_bytes()
     transcript_hash = build_transcript_hash(
         local_server_domain,
-        server_state.client_hello.to_bytes(),
-        server_state.server_hello.to_bytes(),
-        client_finish.to_bytes(),
+        ch_bytes,
+        sh_bytes,
+        cf_bytes,
     )
     root64 = derive_session_root64(
         local_server_domain=local_server_domain,
@@ -498,5 +516,18 @@ def complete_server_handshake(
         x25519_shared_secret=server_state.x25519_shared_secret,
         transcript_hash=transcript_hash,
         kdc_key=kdc_key,
+    )
+    import hashlib
+    _gn_pq_handshake_log(
+        f"server complete_server_handshake "
+        f"transcript_fp={hashlib.sha3_256(transcript_hash).hexdigest()[:16]} "
+        f"root64_fp={hashlib.sha3_256(root64).hexdigest()[:16]} "
+        f"ch_len={len(ch_bytes)} sh_len={len(sh_bytes)} cf_len={len(cf_bytes)} "
+        f"ch_fp={hashlib.sha3_256(ch_bytes).hexdigest()[:16]} "
+        f"sh_fp={hashlib.sha3_256(sh_bytes).hexdigest()[:16]} "
+        f"cf_fp={hashlib.sha3_256(cf_bytes).hexdigest()[:16]} "
+        f"mlkem_ss_fp={hashlib.sha3_256(ml_kem_shared_secret).hexdigest()[:16]} "
+        f"x25519_ss_fp={hashlib.sha3_256(server_state.x25519_shared_secret).hexdigest()[:16]} "
+        f"kdc_key_fp={hashlib.sha3_256(kdc_key).hexdigest()[:16] if kdc_key else 'none'}"
     )
     return GNPQEstablishedState(transcript_hash=transcript_hash, root64=root64)

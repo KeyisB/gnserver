@@ -115,6 +115,7 @@ class ConnectionEncryptor:
         return self._session_root64
 
     def setSessionRoot64(self, root64: bytes, peer_domain: str) -> None:
+        import hashlib
         self_domain = self.eEndpoint._kdc._client._domain
         key_in, key_out = derive_transport_keys_from_root64(
             root64,
@@ -123,6 +124,12 @@ class ConnectionEncryptor:
         )
         self._set_transport_keys(key_in, key_out)
         self._session_root64 = root64
+        _prequic_log(
+            f"setSessionRoot64 root64_fp={hashlib.sha3_256(root64).hexdigest()[:16]} "
+            f"self_domain={self_domain!r} peer_domain={peer_domain!r} "
+            f"key_in_fp={hashlib.sha3_256(key_in).hexdigest()[:16]} "
+            f"key_out_fp={hashlib.sha3_256(key_out).hexdigest()[:16]}"
+        )
 
     def hasTransportKeys(self) -> bool:
         return hasattr(self, '_key_in') and hasattr(self, '_key_out')
@@ -332,30 +339,41 @@ class QuicProtocolShell(QuicConnectionProtocol):
 
     def _apply_gn_pq_session_root(self, peer_domain: Optional[str]) -> bool:
         if not peer_domain:
+            _prequic_log(f"_apply_gn_pq_session_root skip: no peer_domain")
             return False
 
         established = getattr(self._quic, "gn_pq_established_state", None)
         if established is None:
+            _prequic_log(f"_apply_gn_pq_session_root skip: no established state for peer={peer_domain!r}")
             return False
 
         network_paths = getattr(self._quic, "_network_paths", None)
         if not network_paths:
+            _prequic_log(f"_apply_gn_pq_session_root skip: no network_paths for peer={peer_domain!r}")
             return False
 
         addr = network_paths[0].addr
         maddr = DatagramEndpoint.from_addr_to_maddr(addr)
         connectionEnc = self.datagramEndpoint.getDgEnc(maddr)
 
+        _prequic_log(
+            f"_apply_gn_pq_session_root peer={peer_domain!r} maddr={maddr} "
+            f"enc_type={connectionEnc.encryption_type} state={connectionEnc.debug_state()}"
+        )
+
         # Mid-connection upgrade from raw UDP framing would need an explicit epoch switch.
         # Only rekey already-encrypted pre-QUIC associations here.
         if connectionEnc.encryption_type == 0:
+            _prequic_log(f"_apply_gn_pq_session_root skip: encryption_type=0 for peer={peer_domain!r}")
             return False
 
         if connectionEnc.getSessionRoot64() == established.root64:
+            _prequic_log(f"_apply_gn_pq_session_root skip: root64 already set for peer={peer_domain!r}")
             return True
 
         connectionEnc.setSessionRoot64(established.root64, peer_domain)
         connectionEnc.domain = peer_domain
+        _prequic_log(f"_apply_gn_pq_session_root OK: switched keys for peer={peer_domain!r}")
         return True
 
 
@@ -1142,10 +1160,15 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
                 dec = connectionEnc.decrypt(datagram)
                 
             except Exception as e:
+                import hashlib
+                key_in_fp = hashlib.sha3_256(connectionEnc._key_in).hexdigest()[:16] if hasattr(connectionEnc, '_key_in') else 'none'
+                prev_fp = hashlib.sha3_256(connectionEnc._prev_key_in).hexdigest()[:16] if hasattr(connectionEnc, '_prev_key_in') and connectionEnc._prev_key_in else 'none'
+                root64_fp = hashlib.sha3_256(connectionEnc._session_root64).hexdigest()[:16] if connectionEnc._session_root64 else 'none'
                 print(f"UDP: UPD Decryption error: {e}")
                 print(f'info:\naddr: {addr}\n')
                 print(f'{connectionEnc.domain}')
                 print(f'{connectionEnc.keyid}')
+                print(f'key_in_fp={key_in_fp} prev_key_in_fp={prev_fp} root64_fp={root64_fp}')
                 print(f'{connectionEnc.eEndpoint._kdc.getKey(connectionEnc.keyid)}')
                 return
         else:
