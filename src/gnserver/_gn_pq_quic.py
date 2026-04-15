@@ -12,7 +12,7 @@ from aioquic import tls
 from aioquic.asyncio.protocol import QuicConnectionProtocol, QuicStreamHandler
 from aioquic.asyncio.server import QuicServer as AioQuicServer
 from aioquic.buffer import Buffer
-from aioquic.quic.configuration import SMALLEST_MAX_DATAGRAM_SIZE, QuicConfiguration
+from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.connection import NetworkAddress, QuicConnection
 from aioquic.quic.packet import (
     QuicPacketType,
@@ -20,6 +20,7 @@ from aioquic.quic.packet import (
     encode_quic_version_negotiation,
     pull_quic_header,
 )
+import aioquic.quic.configuration as quic_configuration
 
 from ._ctr_ca_pub import get_gn_pq_ca_public_key, has_gn_pq_ca_public_keys
 from ._gn_pq_handshake import (
@@ -535,7 +536,7 @@ class GNQuicServer(AioQuicServer):
         retry_source_connection_id: Optional[bytes] = None
         if (
             protocol is None
-            and len(data) >= SMALLEST_MAX_DATAGRAM_SIZE
+            and len(data) >= quic_configuration.SMALLEST_MAX_DATAGRAM_SIZE
             and header.packet_type == QuicPacketType.INITIAL
         ):
             if self._retry is not None:
