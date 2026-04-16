@@ -466,6 +466,7 @@ class App:
     class _ServerProto(QuicProtocolShell):
         def __init__(self, *a, api: "App", datagramEndpoint: DatagramEndpoint, **kw):
             self._api = api
+            self._peer_maddr = None
 
             super().__init__(*a, datagramEndpoint=datagramEndpoint, client=False, **kw)
             self.setDatagramEndpoint(datagramEndpoint)
@@ -535,7 +536,7 @@ class App:
                 self.setDefault_max_datagram_size()
                 self._refresh_domain()
                 domain = self._domain
-                asyncio.get_event_loop().call_soon(self._apply_gn_pq_session_root, domain)
+                self._apply_gn_pq_session_root(domain)
 
             elif isinstance(event, StreamDataReceived):
                 request = self._feed_request_stream(event.stream_id, event.data, event.end_stream)
@@ -603,6 +604,12 @@ class App:
 
             if self._domain is not None and self._api.connections.get(self._domain) is not self:
                 self._api.connections[self._domain] = self
+
+            if self._peer_maddr is None:
+                network_paths = getattr(self._quic, "_network_paths", None)
+                if network_paths:
+                    addr = network_paths[0].addr
+                    self._peer_maddr = DatagramEndpoint.from_addr_to_maddr(addr)
 
             return self._domain
 

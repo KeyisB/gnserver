@@ -131,6 +131,41 @@ class ConnectionEncryptor:
             f"key_out_fp={hashlib.sha3_256(key_out).hexdigest()[:16]}"
         )
 
+    def setSessionRoot64_receive_only(self, root64: bytes, peer_domain: str) -> None:
+        """Immediately update _key_in for PQ decryption while keeping old _key_out.
+
+        This is used during the handshake-to-PQ transition: the receiving side
+        must accept both old (HKDF) and new (PQ) packets immediately, while the
+        sending side keeps the old key until the next event-loop tick so the
+        remote peer has time to prepare its own _key_in.
+        """
+        import hashlib
+        self_domain = self.eEndpoint._kdc._client._domain
+        key_in, key_out = derive_transport_keys_from_root64(
+            root64,
+            local_domain=self_domain,
+            peer_domain=peer_domain,
+        )
+        if hasattr(self, '_key_in'):
+            self._prev_key_in = self._key_in
+        self._key_in = key_in
+        self._pending_key_out = key_out
+        self._session_root64 = root64
+        _prequic_log(
+            f"setSessionRoot64_receive_only root64_fp={hashlib.sha3_256(root64).hexdigest()[:16]} "
+            f"self_domain={self_domain!r} peer_domain={peer_domain!r} "
+            f"key_in_fp={hashlib.sha3_256(key_in).hexdigest()[:16]} "
+            f"key_out_fp={hashlib.sha3_256(key_out).hexdigest()[:16]} (pending)"
+        )
+
+    def applyPendingKeyOut(self) -> None:
+        """Apply the deferred _key_out switch queued by setSessionRoot64_receive_only."""
+        pending = getattr(self, '_pending_key_out', None)
+        if pending is not None:
+            self._key_out = pending
+            self._pending_key_out = None
+            _prequic_log(f"applyPendingKeyOut applied for domain={self.domain!r}")
+
     def hasTransportKeys(self) -> bool:
         return hasattr(self, '_key_in') and hasattr(self, '_key_out')
 
@@ -320,10 +355,7 @@ class QuicProtocolShell(QuicConnectionProtocol):
         except Exception as exc:
             desc = f"parse-error={type(exc).__name__}: {exc} len={len(data)} first={data[:8].hex()}"
 
-        _prequic_log(
-            f"protocol datagram_received enter addr={addr} quic={desc} state={self._debug_runtime_state()}"
-        )
-
+       
         try:
             super().datagram_received(data, addr)
         except Exception:
@@ -333,9 +365,7 @@ class QuicProtocolShell(QuicConnectionProtocol):
             )
             raise
 
-        _prequic_log(
-            f"protocol datagram_received exit addr={addr} quic={desc} state={self._debug_runtime_state()}"
-        )
+      
 
     def _apply_gn_pq_session_root(self, peer_domain: Optional[str]) -> bool:
         if not peer_domain:
@@ -371,9 +401,10 @@ class QuicProtocolShell(QuicConnectionProtocol):
             _prequic_log(f"_apply_gn_pq_session_root skip: root64 already set for peer={peer_domain!r}")
             return True
 
-        connectionEnc.setSessionRoot64(established.root64, peer_domain)
+        connectionEnc.setSessionRoot64_receive_only(established.root64, peer_domain)
         connectionEnc.domain = peer_domain
-        _prequic_log(f"_apply_gn_pq_session_root OK: switched keys for peer={peer_domain!r}")
+        asyncio.get_event_loop().call_soon(connectionEnc.applyPendingKeyOut)
+        _prequic_log(f"_apply_gn_pq_session_root OK: receive-side switched, send-side deferred for peer={peer_domain!r}")
         return True
 
 
@@ -621,10 +652,15 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
 
     def markProtocolInactive(self, proto: QuicProtocolShell) -> None:
         network_paths = getattr(proto._quic, '_network_paths', None)
-        if not network_paths:
+        peer_maddr = getattr(proto, '_peer_maddr', None)
+
+        if network_paths:
+            maddr = self.from_addr_to_maddr(network_paths[0].addr)
+        elif peer_maddr is not None:
+            maddr = peer_maddr
+        else:
             return
 
-        maddr = self.from_addr_to_maddr(network_paths[0].addr)
         connectionEnc = self.x_maddr_dgEnc.pop(maddr, None)
         if connectionEnc is None:
             return
@@ -988,10 +1024,7 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
         else:
             enc = data
 
-        _prequic_log(
-            f"sendto payload addr={maddr} quic={self._describe_quic_datagram(data)} state={connectionEnc.debug_state()}"
-        )
-
+        
         self.transport.sendMapped(b0 + enc, addr)
 
     def _send_initial_datagram(self, connectionEnc: 'ConnectionEncryptor', data: bytes, addr, keyid) -> None:
@@ -1028,15 +1061,7 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
         current_task = asyncio.current_task()
         try:
             if not connectionEnc.ready:
-                restored = False
-                if self._default_encryption_type != 0 and self._domain is not None:
-                    restored = self._restore_connection_from_inactive_domain(connectionEnc, cast(str, self._domain))
-
-                if restored:
-                    keyid = connectionEnc.keyid
-                    _prequic_log(f"async_sendto restored inactive session addr={maddr} state={connectionEnc.debug_state()}")
-                else:
-                    keyid = await connectionEnc.initByDomain(self._default_encryption_type, cast(str, self._domain))
+                keyid = await connectionEnc.initByDomain(self._default_encryption_type, cast(str, self._domain))
             else:
                 keyid = connectionEnc.keyid
 
@@ -1096,13 +1121,9 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
 
                 if not connectionEnc.ready:
                     if encryption_type != 0: # encrypted
-                        restored = self._restore_connection_from_inactive_keyid(connectionEnc, cast(Tuple[int, int], incoming_keyid))
-                        if restored:
-                            d = connectionEnc.domain
-                        else:
-                            d = await self._init_encrypted_initial_connection(connectionEnc, encryption_type, cast(Tuple[int, int], incoming_keyid), data, addr)
-                            if d is None:
-                                return
+                        d = await self._init_encrypted_initial_connection(connectionEnc, encryption_type, cast(Tuple[int, int], incoming_keyid), data, addr)
+                        if d is None:
+                            return
 
                     else:
                         d = await self._init_unencrypted_initial_connection(connectionEnc, maddr)
@@ -1117,13 +1138,9 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
 
                     if encryption_type != 0:
                         if connectionEnc.keyid != incoming_keyid or connectionEnc.encryption_type != encryption_type:
-                            restored = self._restore_connection_from_inactive_keyid(connectionEnc, cast(Tuple[int, int], incoming_keyid))
-                            if restored:
-                                d = connectionEnc.domain
-                            else:
-                                d = await self._init_encrypted_initial_connection(connectionEnc, encryption_type, cast(Tuple[int, int], incoming_keyid), data, addr)
-                                if d is None:
-                                    return
+                            d = await self._init_encrypted_initial_connection(connectionEnc, encryption_type, cast(Tuple[int, int], incoming_keyid), data, addr)
+                            if d is None:
+                                return
                         else:
                             d = self._kdc.getDomainById(cast(Any, incoming_keyid))
                             if d is None:
@@ -1174,10 +1191,6 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
         else:
             dec = datagram
 
-        _prequic_log(
-            f"handle decrypted addr={maddr} quic={self._describe_quic_datagram(dec)} {self._describe_cid_match(dec)} "
-            f"routing_state={self._describe_routing_state()}"
-        )
 
         if d is not None and isinstance(self._quic_routing, QuicServer):
             self.add_QuicProtocolShellServer_domain(dec, d)
@@ -1191,10 +1204,6 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
             )
             raise
 
-        _prequic_log(
-            f"routing datagram_received done addr={maddr} quic={self._describe_quic_datagram(dec)} "
-            f"routing_state={self._describe_routing_state()}"
-        )
 
 
 print(' '* 25 + f'PID: {os.getpid()}')

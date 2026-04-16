@@ -640,7 +640,7 @@ class RawQuicClient(QuicProtocolShell):
             )
             self.setDefault_max_datagram_size()
             domain = self._QuicClient.domain
-            asyncio.get_event_loop().call_soon(self._apply_gn_pq_session_root, domain)
+            self._apply_gn_pq_session_root(domain)
             return
 
         if isinstance(event, StreamDataReceived):
@@ -904,13 +904,8 @@ class QuicClient:
         except Exception:
             gn_pq_kdc_key = None
 
-        resume_inactive_transport_session = (
-            bootstrap_requires_kdc
-            and self._client._kdc.getInactiveTransportSessionByDomain(self.domain) is not None
-        )
-
         gn_pq_client_settings = None
-        if bootstrap_requires_kdc and not resume_inactive_transport_session:
+        if bootstrap_requires_kdc:
             gn_pq_client_settings = build_gn_pq_client_settings(
                 self.domain,
                 kdc_key=gn_pq_kdc_key,
@@ -918,7 +913,7 @@ class QuicClient:
 
         logger.debug(
             f"Connect setup domain={self.domain} target={ip}:{port} encType={encType} "
-            f"bootstrap_requires_kdc={bootstrap_requires_kdc} resume_inactive={resume_inactive_transport_session} "
+            f"bootstrap_requires_kdc={bootstrap_requires_kdc} "
             f"server_name={cfg.server_name!r} gn_pq={'on' if gn_pq_client_settings is not None else 'off'} "
             f"kdc_key={'set' if gn_pq_kdc_key is not None else 'none'}"
         )
