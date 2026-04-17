@@ -1,5 +1,6 @@
 
 import os
+import random
 import sys
 import time
 import socket
@@ -29,6 +30,9 @@ from gnobjects.net.domains import GNDomain
 from .._gn_pq_session import derive_transport_keys_from_root64
 from ._models import DEPConfig
 
+import logging
+logger = logging.getLogger("GNServer.DatagramEndpoint")
+
 NEW_SIZE = 1191
 import aioquic.quic.configuration as cfg
 cfg.SMALLEST_MAX_DATAGRAM_SIZE = NEW_SIZE
@@ -49,7 +53,7 @@ for name in targets:
 
 def _prequic_log(message: str) -> None:
     stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-    print(f"[{stamp}] [GN PREQUIC] {message}")
+    logger.debug(f"[{stamp}] [GN PREQUIC] {message}")
 
 
 def _format_cid(value: bytes) -> str:
@@ -100,6 +104,11 @@ class ConnectionEncryptor:
         self.processing_lock = asyncio.Lock()
         self.initial_send_task: Optional[asyncio.Task] = None
         self.key_fetching = False
+        self._prev_key_in: Optional[bytes] = None
+        self.__rng = random.Random(int.from_bytes(os.urandom(32), 'big'))
+
+    def rand2(self) -> int:
+        return self.__rng.getrandbits(16)
 
     def _set_transport_keys(self, key_in: bytes, key_out: bytes) -> None:
         if len(key_in) != 32 or len(key_out) != 32:
@@ -267,7 +276,7 @@ class ConnectionEncryptor:
     def _make_nonce(self) -> bytes: # 15B
         now = int(time.time()) & 0xFFFFFFFFFF
         self.counter = (self.counter + 1) & 0xFFFFFFFFFFFFFFFF
-        return now.to_bytes(5, "big") + self.counter.to_bytes(8, "big") + os.urandom(2)
+        return now.to_bytes(5, "big") + self.counter.to_bytes(8, "big") + self.rand2().to_bytes(2, "big")
     
     def encrypt(self, packet: bytes) -> bytes:
         nonce = self._make_nonce()
@@ -284,10 +293,11 @@ class ConnectionEncryptor:
         try:
             cipher = AES.new(self._key_in, AES.MODE_OCB, nonce=nonce, mac_len=16)
             result = cipher.decrypt_and_verify(ciphertext, tag)
-            self._prev_key_in = None
+            if self._prev_key_in is not None:
+                self._prev_key_in = None
             return result
         except Exception:
-            prev = getattr(self, '_prev_key_in', None)
+            prev = self._prev_key_in
             if prev is not None:
                 cipher = AES.new(prev, AES.MODE_OCB, nonce=nonce, mac_len=16)
                 return cipher.decrypt_and_verify(ciphertext, tag)
@@ -342,23 +352,22 @@ class QuicProtocolShell(QuicConnectionProtocol):
         )
 
     def datagram_received(self, data, addr) -> None:
-        data = cast(bytes, data)
-        host_cid_length = getattr(getattr(self._quic, '_configuration', None), 'connection_id_length', None)
-        try:
-            header = pull_quic_header(Buffer(data=data), host_cid_length=host_cid_length)
-            extra = max(0, len(data) - header.packet_length)
-            desc = (
-                f"type={header.packet_type.name.lower()} len={header.packet_length}/{len(data)} "
-                f"version={header.version} dcid={_format_cid(header.destination_cid)} "
-                f"scid={_format_cid(header.source_cid)} token_len={len(header.token)} extra={extra}"
-            )
-        except Exception as exc:
-            desc = f"parse-error={type(exc).__name__}: {exc} len={len(data)} first={data[:8].hex()}"
-
-       
         try:
             super().datagram_received(data, addr)
         except Exception:
+            data = cast(bytes, data)
+            desc = 'unknown'
+            try:
+                host_cid_length = getattr(getattr(self._quic, '_configuration', None), 'connection_id_length', None)
+                header = pull_quic_header(Buffer(data=data), host_cid_length=host_cid_length)
+                extra = max(0, len(data) - header.packet_length)
+                desc = (
+                    f"type={header.packet_type.name.lower()} len={header.packet_length}/{len(data)} "
+                    f"version={header.version} dcid={_format_cid(header.destination_cid)} "
+                    f"scid={_format_cid(header.source_cid)} token_len={len(header.token)} extra={extra}"
+                )
+            except Exception:
+                desc = f"parse-error len={len(data)} first={data[:8].hex()}"
             _prequic_log(
                 f"protocol datagram_received error addr={addr} quic={desc} state={self._debug_runtime_state()} "
                 f"trace={traceback.format_exc()}"
@@ -454,9 +463,10 @@ class TransportProxy(asyncio.DatagramTransport):
         
 
 
-    def sendMapped(self, data: bytes, addr=None):
-        maddr = DatagramEndpoint.from_addr_to_maddr(addr)
-        if maddr in self.tablex_maddr_isV4:
+    def sendMapped(self, data: bytes, addr=None, *, _maddr=None):
+        if _maddr is None:
+            _maddr = DatagramEndpoint.from_addr_to_maddr(addr)
+        if _maddr in self.tablex_maddr_isV4:
             self.base4.sendto(data, addr)
         else:
             self.base6.sendto(data, addr)
@@ -519,6 +529,13 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
             if a is not None:
                 self.active_key_synchronization_callback_domain_filter = DomainMatcherList(a)
                 del a
+
+        self.__info_dg_count = 0
+        self._payload_b0 = bytes([((self._gn_protocol_version & 0x7F) << 1)])
+    
+    def __info_dg_count_s(self):
+        return
+        logger.debug(f"datagrams: got={self.__info_dg_count}")
 
     async def _is_kdc_bootstrap_allowed_for_local_domain(self) -> bool:
         if self._domain is None:
@@ -924,6 +941,26 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
         if not self._inbound_started:
             self._start_inbound_workers()
 
+        # ── fast path: payload packet on warm connection ──
+        if len(data) > 1 and not (data[0] & 0x01):
+            version = (data[0] >> 1) & 0x7F
+            if version == self._gn_protocol_version:
+                maddr = self.from_addr_to_maddr(addr)
+                connectionEnc = self.x_maddr_dgEnc.get(maddr)
+                if connectionEnc is not None and connectionEnc.ready:
+                    if connectionEnc.encryption_type != 0:
+                        try:
+                            dec = connectionEnc.decrypt(data[1:])
+                        except Exception:
+                            return
+                    else:
+                        dec = data[1:]
+                    self.__info_dg_count += 1
+                    self._quic_routing.datagram_received(dec, addr)
+                    self.__info_dg_count_s()
+                    return
+
+        # ── slow path: queue for async worker ──
         now = time.monotonic()
         self._prune_load_window(now)
 
@@ -1008,9 +1045,6 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
             _prequic_log(f"sendto queued addr={maddr} reason=not-ready state={connectionEnc.debug_state()}")
             connectionEnc.not_ready_queue.put_nowait((data, addr))
             return
-        
-
-        b0 = bytes([((self._gn_protocol_version & 0x7F) << 1) | (False & 0x01)])
 
         if connectionEnc.encryption_type != 0:
             try:
@@ -1024,8 +1058,7 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
         else:
             enc = data
 
-        
-        self.transport.sendMapped(b0 + enc, addr)
+        self.transport.sendMapped(self._payload_b0 + enc, addr, _maddr=maddr)
 
     def _send_initial_datagram(self, connectionEnc: 'ConnectionEncryptor', data: bytes, addr, keyid) -> None:
         maddr = self.from_addr_to_maddr(addr)
@@ -1080,6 +1113,9 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
         if not data:
             _prequic_log(f"handle datagram dropped: empty payload addr={addr}")
             return
+        
+        self.__info_dg_count += 1
+        self.__info_dg_count_s()
         
         value = (data[0] >> 1) & 0x7F
         if value != self._gn_protocol_version:
@@ -1163,9 +1199,9 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
         else:
             datagram = data[1:]
 
-            _prequic_log(
-                f"handle payload packet addr={maddr} wrapped_len={len(data)} state_before={connectionEnc.debug_state()}"
-            )
+            # _prequic_log(
+            #     f"handle payload packet addr={maddr} wrapped_len={len(data)} state_before={connectionEnc.debug_state()}"
+            # )
 
             if not connectionEnc.ready:
                 _prequic_log(f"handle payload queued addr={maddr} reason=not-ready state={connectionEnc.debug_state()}")
