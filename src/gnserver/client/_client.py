@@ -616,7 +616,6 @@ class RawQuicClient(QuicProtocolShell):
         return None
 
     def quic_event_received(self, event: QuicEvent) -> None:
-        print(f'Event received: {event}')
         if isinstance(event, HandshakeCompleted):
             logger.debug(
                 f'HandshakeCompleted for {self._QuicClient.domain}: '
@@ -765,7 +764,7 @@ class RawQuicClient(QuicProtocolShell):
         if only_request:
             return AllGNFastCommands.transport.NoResponse()
         
-        logger.info(f'Waiting for response on stream {sid}...')
+        logger.debug(f'Waiting for response on stream {sid}...')
         try:
             data = await asyncio.wait_for(fut, 30)
             logger.debug(f'Response received on stream {sid}')
@@ -889,10 +888,12 @@ class QuicClient:
         except Exception:
             gn_pq_kdc_key = None
 
-        gn_pq_client_settings = build_gn_pq_client_settings(
-            self.domain,
-            kdc_key=gn_pq_kdc_key,
-        )
+        gn_pq_client_settings = None
+        if bootstrap_requires_kdc:
+            gn_pq_client_settings = build_gn_pq_client_settings(
+                self.domain,
+                kdc_key=gn_pq_kdc_key if bootstrap_requires_kdc else None,
+            )
 
         logger.debug(
             f"Connect setup domain={self.domain} target={ip}:{port} encType={encType} "
