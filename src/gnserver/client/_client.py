@@ -93,6 +93,10 @@ class AsyncClient:
 
         self._rcms_id: int = 0
 
+        # First DNS core: TLS only (encType 0)
+        self._kdc.setDomainEcryptionType(AsyncClient._dns_core__ipv6, 0)
+        self._kdc.setDomainEcryptionType(AsyncClient._dns_core__domain, 0)
+
     def init(self,
              gn_crt: Union[bytes, str, Path, dict],
              requested_domains: list[str] | None = None,
@@ -864,9 +868,16 @@ class QuicClient:
         cfg.idle_timeout = self._client._configuration.get('L5', {}).get('disconnection', {}).get('idle_timeout', 60)
 
         target_ipv6 = Url.ip_and_port_to_ipv6_with_port(ip, port)
-        bootstrap_requires_kdc = self.domain != target_ipv6
+        is_ip_connection = self.domain == target_ipv6
 
-        if bootstrap_requires_kdc and self._client.server is not None:
+        # Determine encryption type: 0=TLS, 1=KDC+PQ+TLS, 2=PQ+TLS
+        if self._client._kdc.getDomainEcryptionType(self.domain) is not None:
+            encType = self._client._kdc.getDomainEcryptionType(self.domain)
+        else:
+            encType = 2 if is_ip_connection else 1
+            self._client._kdc.setDomainEcryptionType(self.domain, encType)
+
+        if encType == 1 and self._client.server is not None:
             if not await self._client.server.DEPConfig.isKDCAllowedForDomain(self.domain):
                 raise AllGNFastCommands.transport.PolicyDenied({
                     'policy': 'kdc_allowed_domains',
@@ -874,30 +885,32 @@ class QuicClient:
                     'reason': 'KDC bootstrap disabled for domain until GN QUIC handshake key-upgrade is enabled',
                 })
 
-        encType = int(bootstrap_requires_kdc)
-        if self._client._kdc.getDomainEcryptionType(self.domain) is None:
-            self._client._kdc.setDomainEcryptionType(self.domain, encType)
-        else:
-            encType = self._client._kdc.getDomainEcryptionType(self.domain)
-
-        if encType != 0:
+        if encType == 1:
             await self._client._kdc.requestKeyIfNotExist(self.domain)
 
-        try:
-            gn_pq_kdc_key = self._client._kdc.getKey(self.domain)
-        except Exception:
-            gn_pq_kdc_key = None
+        gn_pq_kdc_key = None
+        if encType == 1:
+            try:
+                gn_pq_kdc_key = self._client._kdc.getKey(self.domain)
+            except Exception:
+                gn_pq_kdc_key = None
 
-        gn_pq_client_settings = None
-        if bootstrap_requires_kdc:
+        if encType == 0:
+            gn_pq_client_settings = None
+        elif encType == 1:
             gn_pq_client_settings = build_gn_pq_client_settings(
                 self.domain,
-                kdc_key=gn_pq_kdc_key if bootstrap_requires_kdc else None,
+                kdc_key=gn_pq_kdc_key,
+            )
+        else:  # encType >= 2 (PQ + TLS, no KDC)
+            gn_pq_client_settings = build_gn_pq_client_settings(
+                self.domain,
+                kdc_key=None,
             )
 
         logger.debug(
             f"Connect setup domain={self.domain} target={ip}:{port} encType={encType} "
-            f"bootstrap_requires_kdc={bootstrap_requires_kdc} "
+            f"is_ip_connection={is_ip_connection} "
             f"server_name={cfg.server_name!r} gn_pq={'on' if gn_pq_client_settings is not None else 'off'} "
             f"kdc_key={'set' if gn_pq_kdc_key is not None else 'none'}"
         )

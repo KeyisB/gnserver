@@ -130,8 +130,9 @@ class KDCObject:
 
     def setDomainEcryptionType(self, domain_or_keyId: Union[str, int], type: int = 1) -> None:
         self._encryption_type[domain_or_keyId] = type
-        # 0 = not encrypted
-        # 1 = encrypted
+        # 0 = TLS only (no PQ, no KDC)
+        # 1 = KDC + PQ + TLS (default for named domains)
+        # 2 = PQ + TLS (no KDC, default for IP connections)
     def getDomainEcryptionType(self, domain_or_keyId: Union[str, int]) -> Optional[int]:
         return self._encryption_type.get(domain_or_keyId)
 

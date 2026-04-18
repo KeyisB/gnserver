@@ -626,7 +626,7 @@ def _gn_pq_server_handle_hello(
         from .server._datagram_enc import DatagramEndpoint as _DEP
         _maddr = _DEP.from_addr_to_maddr(_quic_conn._network_paths[0].addr)
         _cEnc = _dep.x_maddr_dgEnc.get(_maddr)
-        if _cEnc is not None and _cEnc.keyid != (0, 0):
+        if _cEnc is not None and _cEnc.keyid != (0, 0) and _cEnc.keyid[0] != 250:
             self._gn_pq_peer_kdc_key = _dep._kdc.getKey(_cEnc.keyid)
             _gn_pq_log(
                 f"server resolved peer kdc key keyid={_cEnc.keyid} "

@@ -237,6 +237,13 @@ class ConnectionEncryptor:
         self.ready = True
         _prequic_log(f"initRaw success local_domain={self.eEndpoint._domain!r} state={self.debug_state()}")
 
+    async def initType2(self):
+        self.encryption_type = 2
+        self.keyid = (250, 0)
+        self._session_root64 = None
+        self.ready = True
+        _prequic_log(f"initType2 success local_domain={self.eEndpoint._domain!r} state={self.debug_state()}")
+
     
     async def initByDomain(self, encryption_type: int, domain: str) -> tuple[int, int]:
 
@@ -245,6 +252,10 @@ class ConnectionEncryptor:
         if encryption_type == 0:
             await self.initRaw()
             return (0, 0)
+
+        if encryption_type == 2:
+            await self.initType2()
+            return (250, 0)
 
         await self.eEndpoint._kdc.requestKeyIfNotExist(domain)
 
@@ -747,6 +758,13 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
         connectionEnc.domain = d
         return d
 
+    async def _init_pq_initial_connection(self, connectionEnc: ConnectionEncryptor, maddr: Tuple[str, int, int]) -> str:
+        await connectionEnc.initType2()
+        d = Url.ip_and_port_to_ipv6_with_port(maddr[0], maddr[1])
+        connectionEnc.domain = d
+        _prequic_log(f"_init_pq_initial_connection success addr={maddr} domain={d!r} state={connectionEnc.debug_state()}")
+        return d
+
     async def _fetch_key_and_resume(self, connectionEnc: ConnectionEncryptor, encryption_type: int, keyid: Tuple[int, int]):
         try:
             await self._kdc.requestKeyIfNotExist(keyid)
@@ -948,7 +966,7 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
                 maddr = self.from_addr_to_maddr(addr)
                 connectionEnc = self.x_maddr_dgEnc.get(maddr)
                 if connectionEnc is not None and connectionEnc.ready:
-                    if connectionEnc.encryption_type != 0:
+                    if connectionEnc.encryption_type != 0 and connectionEnc.hasTransportKeys():
                         try:
                             dec = connectionEnc.decrypt(data[1:])
                         except Exception:
@@ -1046,7 +1064,7 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
             connectionEnc.not_ready_queue.put_nowait((data, addr))
             return
 
-        if connectionEnc.encryption_type != 0:
+        if connectionEnc.encryption_type != 0 and connectionEnc.hasTransportKeys():
             try:
                 enc = connectionEnc.encrypt(data)
             except Exception:
@@ -1069,7 +1087,7 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
             f"quic={self._describe_quic_datagram(data)} state={connectionEnc.debug_state()}"
         )
 
-        if effective_encryption_type != 0:
+        if effective_encryption_type != 0 and connectionEnc.hasTransportKeys():
             try:
                 enc = connectionEnc.encrypt(data)
             except Exception:
@@ -1156,11 +1174,12 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
                 )
 
                 if not connectionEnc.ready:
-                    if encryption_type != 0: # encrypted
+                    if encryption_type == 2: # PQ only (no KDC)
+                        d = await self._init_pq_initial_connection(connectionEnc, maddr)
+                    elif encryption_type != 0: # KDC encrypted
                         d = await self._init_encrypted_initial_connection(connectionEnc, encryption_type, cast(Tuple[int, int], incoming_keyid), data, addr)
                         if d is None:
                             return
-
                     else:
                         d = await self._init_unencrypted_initial_connection(connectionEnc, maddr)
 
@@ -1172,7 +1191,12 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
                     # Reuse the established transport state for repeated QUIC connections.
                     # Only refresh when the transport association itself changes.
 
-                    if encryption_type != 0:
+                    if encryption_type == 2: # PQ only (no KDC)
+                        if connectionEnc.encryption_type != 2:
+                            d = await self._init_pq_initial_connection(connectionEnc, maddr)
+                        else:
+                            d = connectionEnc.domain
+                    elif encryption_type != 0:
                         if connectionEnc.keyid != incoming_keyid or connectionEnc.encryption_type != encryption_type:
                             d = await self._init_encrypted_initial_connection(connectionEnc, encryption_type, cast(Tuple[int, int], incoming_keyid), data, addr)
                             if d is None:
@@ -1208,7 +1232,7 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
                 connectionEnc.not_ready_queue.put_nowait((data, addr))
                 return
 
-        if connectionEnc.encryption_type != 0:
+        if connectionEnc.encryption_type != 0 and connectionEnc.hasTransportKeys():
             try:
                 dec = connectionEnc.decrypt(datagram)
                 
