@@ -18,6 +18,11 @@ from .._gn_pq_quic import GNQuicClientSettings, GNQuicConnection
 if TYPE_CHECKING:
     from ._client import QuicClient, RawQuicClient
 
+
+import logging
+logger = logging.getLogger("GNServer.DatagramEndpoint")
+
+
 @asynccontextmanager
 async def connect(
     quicClient: 'QuicClient',
@@ -89,7 +94,7 @@ async def connect(
     sock.bind(("::", local_port, 0, 0))
     local_addr = sock.getsockname()
 
-    print(
+    logger.debug(
         f"[GN QUIC SHELL] bind local_addr={local_addr} remote_addr={addr} domain={domain!r} "
         f"encType={encType} wait_connected={wait_connected} server_name={configuration.server_name!r}"
     )

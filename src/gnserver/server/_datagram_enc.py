@@ -759,7 +759,7 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
                     await self._finalize_key_and_flush(connectionEnc, encryption_type, keyid)
         except Exception as e:
             connectionEnc.ready = None
-            print(f'UDP key fetch error: {traceback.format_exc()}')
+            logger.warning(f'UDP key fetch error: {traceback.format_exc()}')
         finally:
             connectionEnc.key_fetching = False
 
@@ -808,7 +808,7 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                print(f'UDP worker[{worker_id}] error: {traceback.format_exc()}')
+                logger.error(f'UDP worker[{worker_id}] error: {traceback.format_exc()}')
             finally:
                 queue.task_done()
 
@@ -972,7 +972,7 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
             self._inbound_drop_count += 1
             self._load_drop_events.append(now)
             if self._inbound_drop_count == 1 or self._inbound_drop_count % 1024 == 0:
-                print(
+                logger.warning(
                     f'UDP inbound queue overflow: dropped={self._inbound_drop_count}, '
                     f'workers={self._inbound_workers}, queue_maxsize={self._inbound_queue_size}'
                 )
@@ -1129,7 +1129,7 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
 
         connectionEnc  = self.getDgEnc(maddr)
         if connectionEnc.ready is None:
-            print(f'UDP: datagramm blocked ({maddr})')
+            logger.warning(f'UDP: datagramm blocked ({maddr})')
 
         d = None
 
@@ -1217,12 +1217,13 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
                 key_in_fp = hashlib.sha3_256(connectionEnc._key_in).hexdigest()[:16] if hasattr(connectionEnc, '_key_in') else 'none'
                 prev_fp = hashlib.sha3_256(connectionEnc._prev_key_in).hexdigest()[:16] if hasattr(connectionEnc, '_prev_key_in') and connectionEnc._prev_key_in else 'none'
                 root64_fp = hashlib.sha3_256(connectionEnc._session_root64).hexdigest()[:16] if connectionEnc._session_root64 else 'none'
-                print(f"UDP: UPD Decryption error: {e}")
-                print(f'info:\naddr: {addr}\n')
-                print(f'{connectionEnc.domain}')
-                print(f'{connectionEnc.keyid}')
-                print(f'key_in_fp={key_in_fp} prev_key_in_fp={prev_fp} root64_fp={root64_fp}')
-                print(f'{connectionEnc.eEndpoint._kdc.getKey(connectionEnc.keyid)}')
+                logger.error(
+                    f"UDP: UPD Decryption error: {e}"
+                    f'info:\naddr: {addr}\n'
+                    f'{connectionEnc.domain}'
+                    f'{connectionEnc.keyid}'
+                    f'key_in_fp={key_in_fp} prev_key_in_fp={prev_fp} root64_fp={root64_fp}'
+                    f'{connectionEnc.eEndpoint._kdc.getKey(connectionEnc.keyid)}')
                 return
         else:
             dec = datagram
@@ -1241,5 +1242,3 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
             raise
 
 
-
-print(' '* 25 + f'PID: {os.getpid()}')

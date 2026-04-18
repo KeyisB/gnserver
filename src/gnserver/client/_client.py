@@ -31,20 +31,8 @@ from ._client_quic_shell import connect
 if TYPE_CHECKING:
     from ..server._app import App
 
-logger = logging.getLogger("GNClient")
-logger.setLevel(logging.DEBUG)
-logger.propagate = False
-if logger.hasHandlers():
-    logger.handlers.clear()
+logger = logging.getLogger("GNServer.Client")
 
-formatter = logging.Formatter(
-    "[%(asctime)s] [%(name)s] %(levelname)s: %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
-)
-console = logging.StreamHandler(sys.stdout)
-console.setLevel(logging.DEBUG)
-console.setFormatter(formatter)
-logger.addHandler(console)
 
 
 
@@ -236,7 +224,7 @@ class AsyncClient:
         data = await self.getDNS(domain, host=domain if request.url.isIp else None)
 
         data = Url.ipv6_with_port_to_ipv6_and_port(data)
-        print(f'Connecting to {domain} dns: {data} (restart_connection={restart_connection}, reconnect_wait={reconnect_wait}, keep_alive={keep_alive})')
+        logger.info(f'Connecting to {domain} dns: {data} (restart_connection={restart_connection}, reconnect_wait={reconnect_wait}, keep_alive={keep_alive})')
 
         # if data[0].startswith('::ffff:'):
         #     data = (data[0][7:], data[1])
@@ -628,6 +616,7 @@ class RawQuicClient(QuicProtocolShell):
         return None
 
     def quic_event_received(self, event: QuicEvent) -> None:
+        print(f'Event received: {event}')
         if isinstance(event, HandshakeCompleted):
             logger.debug(
                 f'HandshakeCompleted for {self._QuicClient.domain}: '
@@ -776,10 +765,10 @@ class RawQuicClient(QuicProtocolShell):
         if only_request:
             return AllGNFastCommands.transport.NoResponse()
         
-        #print(f'Waiting for response on stream {sid}...')
+        logger.info(f'Waiting for response on stream {sid}...')
         try:
             data = await asyncio.wait_for(fut, 30)
-            #print(f'Response received on stream {sid}, length: {len(data) if data else "None"} bytes')
+            logger.debug(f'Response received on stream {sid}')
         except asyncio.exceptions.TimeoutError:
             self._inflight.pop(sid, None)
             self._buffer.pop(sid, None)
@@ -789,7 +778,7 @@ class RawQuicClient(QuicProtocolShell):
             self._timed_out_streams.add(sid)
             if len(self._timed_out_streams) > 8192:
                 self._timed_out_streams.clear()
-            print(f'Timeout waiting for response on stream {sid}')
+            logger.warning(f'Timeout waiting for response on stream {sid}')
             return AllGNFastCommands.transport.ReceiveTimeout()
         except Exception:
             self._inflight.pop(sid, None)
@@ -800,16 +789,16 @@ class RawQuicClient(QuicProtocolShell):
             self._timed_out_streams.add(sid)
             if len(self._timed_out_streams) > 8192:
                 self._timed_out_streams.clear()
-            print(traceback.format_exc())
+            logger.error(traceback.format_exc())
             return AllGNFastCommands.transport.ConnectionError()
-        #print(f'Raw response data: {data[:100] if data else "None"}{"..." if data and len(data) > 100 else ""}')
+        
         if data is None:
             return AllGNFastCommands.transport.ConnectionError()
 
         if isinstance(data, GNResponse):
             return data
         
-        #print(f'Deserializing response on stream {sid}...')
+        logger.debug(f'Deserializing response on stream {sid}...')
 
         r = self._deserialize(data, False)
         return r
@@ -900,12 +889,10 @@ class QuicClient:
         except Exception:
             gn_pq_kdc_key = None
 
-        gn_pq_client_settings = None
-        if bootstrap_requires_kdc:
-            gn_pq_client_settings = build_gn_pq_client_settings(
-                self.domain,
-                kdc_key=gn_pq_kdc_key,
-            )
+        gn_pq_client_settings = build_gn_pq_client_settings(
+            self.domain,
+            kdc_key=gn_pq_kdc_key,
+        )
 
         logger.debug(
             f"Connect setup domain={self.domain} target={ip}:{port} encType={encType} "
@@ -943,7 +930,7 @@ class QuicClient:
             if not self.connect_future.done():
                 self.connect_future.set_result(True)
         except Exception as e:
-            print(f'Error connecting: {e}')
+            logger.error(f'Error connecting: {e}')
             if not self.connect_future.done():
                 self.connect_future.set_exception(AllGNFastCommands.transport.ConnectionError('Не удалось подключится к серверу'))
             await self._client_cm.__aexit__(None, None, None)

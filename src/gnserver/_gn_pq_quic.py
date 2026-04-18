@@ -45,13 +45,17 @@ from ._gn_pq_session import (
     GNPQServerHello,
 )
 
+import logging
+logger = logging.getLogger("GNServer.DatagramEndpoint.PQ")
+
+
 GN_PQ_CLIENT_HELLO_EXTENSION_TYPE = 0xFF80
 GN_PQ_SERVER_HELLO_EXTENSION_TYPE = 0xFF81
 
 
 def _gn_pq_log(message: str) -> None:
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{stamp}] [GN PQ] {message}")
+    logger.debug(f"[{stamp}] [GN PQ] {message}")
 
 
 def _format_cid(value: Optional[bytes]) -> str:
@@ -313,11 +317,8 @@ def extract_gn_pq_server_settings(gn_server_crt: dict) -> Optional[GNQuicServerS
         raise ValueError("gn_server_crt.crypto.crt must be a dict")
 
     kdc = crypto.get("kdc")
-    if not isinstance(kdc, dict):
-        raise ValueError("gn_server_crt.crypto.kdc must be a dict")
-
-    if "key" not in kdc:
-        raise ValueError("gn_server_crt.crypto.kdc.key is required")
+    if kdc is not None and not isinstance(kdc, dict):
+        raise ValueError("gn_server_crt.crypto.kdc must be a dict or None")
 
     certificate = _parse_server_certificate(crt_container)
     if certificate.name != server_domain:
@@ -331,7 +332,11 @@ def extract_gn_pq_server_settings(gn_server_crt: dict) -> Optional[GNQuicServerS
         f"unsigned_len={len(certificate.unsigned_bytes())}"
     )
 
-    kdc_key = _decode_user_friendly_bytes(kdc["key"])
+    kdc_key = None
+    if isinstance(kdc, dict) and "key" in kdc and kdc["key"] is not None:
+        decoded_kdc_key = _decode_user_friendly_bytes(kdc["key"])
+        if decoded_kdc_key:
+            kdc_key = decoded_kdc_key
 
     return GNQuicServerSettings(
         server_domain=server_domain,

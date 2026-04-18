@@ -41,9 +41,13 @@ from .oqs import (
 
 from KeyisBTools import userFriendly
 
+
+import logging
+logger = logging.getLogger("GNServer.DatagramEndpoint.PQ")
+
 def _gn_pq_handshake_log(message: str) -> None:
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{stamp}] [GN PQ] {message}")
+    logger.debug(f"[{stamp}] [GN PQ] {message}")
 
 
 def _sha3_256_hex(data: bytes) -> str:

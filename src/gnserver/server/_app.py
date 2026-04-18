@@ -1000,3 +1000,5 @@ class App:
                 raise AllGNFastCommands.Forbidden()
             return responses.ok({'time': datetime.datetime.now(datetime.timezone.utc).isoformat()})
 
+
+logger.info(f'PID: {os.getpid()}')

@@ -13,6 +13,11 @@ if TYPE_CHECKING:
     from .client._client import AsyncClient
 
 
+import logging
+logger = logging.getLogger("GNServer.DatagramEndpoint.KDC")
+
+
+
 @dataclass(slots=True)
 class InactiveTransportSession:
     domain: str
@@ -34,6 +39,14 @@ class KDCObject:
         self._inactive_transport_sessions_keyid_domain: Dict[Tuple[int, int], str] = {}
 
         self.second_kdc_domains_patterns: Optional[DomainMatcherList] = None
+        self._kdc_domain: Optional[str] = None
+        self._kdc_domain_id: Optional[Tuple[int, int]] = None
+        self._second_kdc_domain: Optional[str] = None
+        self._second_kdc_domain_id: Optional[Tuple[int, int]] = None
+        self._active_key_synchronization = True
+        self.__active_key_synchronization_callback = None
+        self.__active_key_synchronization_callback_is_async = False
+        self._active_key_synchronization_df = None
 
     def init(self,
              gn_crt: Optional[Union[bytes, str, Path, dict]] = None,
@@ -60,16 +73,36 @@ class KDCObject:
         if not isinstance(crypto, dict):
             raise ValueError('gn_server_crt.crypto must be dict')
 
-        kdc = crypto.get('kdc')
-        if not isinstance(kdc, dict):
-            raise ValueError('gn_server_crt.crypto.kdc must be dict')
-
         self._domain: str = self._gn_crt_data['domain']
-        self._kdc_domain = kdc['domain']
-        self._kdc_domain_id = (255, kdc['self_domain_id'])
+        self._requested_domains = list(requested_domains or [])
+        self._active_key_synchronization = active_key_synchronization
 
-        self._x_domain_keyId[self._kdc_domain] = self._kdc_domain_id
-        self._x_keyId_key[self._kdc_domain_id] = kdc['key']
+        self.__active_key_synchronization_callback = active_key_synchronization_callback
+        self.__active_key_synchronization_callback_is_async = inspect.iscoroutinefunction(active_key_synchronization_callback)
+
+        if active_key_synchronization_callback is not None and active_key_synchronization_callback_domainFilter is not None:
+            self._active_key_synchronization_df = DomainMatcherList(active_key_synchronization_callback_domainFilter)
+        else:
+            self._active_key_synchronization_df = None
+
+        kdc = crypto.get('kdc')
+        self._kdc_domain = None
+        self._kdc_domain_id = None
+        self._second_kdc_domain = None
+        self._second_kdc_domain_id = None
+
+        if kdc is None:
+            return
+        if not isinstance(kdc, dict):
+            raise ValueError('gn_server_crt.crypto.kdc must be dict or None')
+
+        kdc_domain = kdc['domain']
+        kdc_domain_id = (255, kdc['self_domain_id'])
+        self._kdc_domain = kdc_domain
+        self._kdc_domain_id = kdc_domain_id
+
+        self._x_domain_keyId[kdc_domain] = kdc_domain_id
+        self._x_keyId_key[kdc_domain_id] = kdc['key']
 
 
         self._second_kdc_domain = kdc.get('second_domain')
@@ -83,24 +116,17 @@ class KDCObject:
 
         # если запросим второй kdc, а в crt только 1, то попробуем прокинуть первый как второй. Упрощение для core серверов.
         if self._second_kdc_domain is None and self._second_kdc_domain_id is None:
-            self._second_kdc_domain = self._kdc_domain
-            self._second_kdc_domain_id = self._kdc_domain_id
-            self._x_domain_keyId[self._second_kdc_domain] = self._kdc_domain_id
-            self._x_keyId_key[self._second_kdc_domain_id] = kdc['key']
+            self._second_kdc_domain = kdc_domain
+            self._second_kdc_domain_id = kdc_domain_id
+            self._x_domain_keyId[kdc_domain] = kdc_domain_id
+            self._x_keyId_key[kdc_domain_id] = kdc['key']
 
+    def hasConfiguredKDC(self) -> bool:
+        return self._kdc_domain is not None and self._kdc_domain_id is not None
 
-
-        self._requested_domains = list(requested_domains or [])
-        self._active_key_synchronization = active_key_synchronization
-
-        
-        self.__active_key_synchronization_callback = active_key_synchronization_callback
-        self.__active_key_synchronization_callback_is_async = inspect.iscoroutinefunction(active_key_synchronization_callback)
-
-        if active_key_synchronization_callback is not None and active_key_synchronization_callback_domainFilter is not None:
-            self._active_key_synchronization_df = DomainMatcherList(active_key_synchronization_callback_domainFilter)
-        else:
-            self._active_key_synchronization_df = None
+    def _require_kdc_config(self) -> None:
+        if not self.hasConfiguredKDC():
+            raise ValueError('KDC is not configured for gn_server_crt')
 
     def setDomainEcryptionType(self, domain_or_keyId: Union[str, int], type: int = 1) -> None:
         self._encryption_type[domain_or_keyId] = type
@@ -181,10 +207,11 @@ class KDCObject:
             keyId = tuple(keyId) if isinstance(keyId, (tuple, list)) else (0, keyId)
             self._x_domain_keyId[domain] = keyId
             self._x_keyId_key[keyId] = key
-            print(f'KDC: Добавлены ключи domain: {domain}, keyId: {keyId}')
+            logger.debug(f'KDC: Добавлены ключи domain: {domain}, keyId: {keyId}')
 
     async def _requestKDC(self, domain_or_keyId: List[Union[str, Tuple[int, int]]]):
-        print(f'RAW: start kdc request to [{domain_or_keyId}]')
+        self._require_kdc_config()
+        logger.debug(f'RAW: start kdc request to [{domain_or_keyId}]')
 
         d = self._kdc_domain
 
@@ -201,16 +228,16 @@ class KDCObject:
 
         rs = await self._client.request(GNRequest('get', Url(f'gn://{d}/api/sys/server/keys'),
                                                 payload=domain_or_keyId), keep_alive=self._active_key_synchronization)
-        print('RAW: END kdc request')
+        logger.debug('RAW: END kdc request')
 
         rs_payload = await rs.payload
 
         if not rs.command.ok:
-            print(f'ERROR: {rs.command} {rs_payload}')
+            logger.error(f'ERROR: {rs.command} {rs_payload}')
             raise rs
         
         if not isinstance(rs_payload, list):
-            print(f'command.value -> {rs.command.value}. ok: {bool(rs.command.ok)}, app: {bool(rs.command.app)}, cors: {bool(rs.command.cors)}, dns: {bool(rs.command.dns)}, dns.DomainBlocked: {bool(rs.command.dns.DomainBlocked)}, Forbidden: {bool(rs.command.Forbidden)}, app.Forbidden: {bool(rs.command.app.Forbidden)}')
+            logger.error(f'command.value -> {rs.command.value}. ok: {bool(rs.command.ok)}, app: {bool(rs.command.app)}, cors: {bool(rs.command.cors)}, dns: {bool(rs.command.dns)}, dns.DomainBlocked: {bool(rs.command.dns.DomainBlocked)}, Forbidden: {bool(rs.command.Forbidden)}, app.Forbidden: {bool(rs.command.app.Forbidden)}')
             raise AllGNFastCommands.kdc.InvalidResponseFormat(f'r.payload is not list. {type(rs_payload)} -> {rs_payload}')
 
         return rs_payload

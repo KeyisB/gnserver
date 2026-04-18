@@ -47,7 +47,8 @@ __all__ = [
     'DEPConfig',
     'GNTransportProtocol',
     'AsyncClient',
-    'response'
+    'response',
+    'config'
 ]
 
 from .server._gnserver import GNServer
@@ -63,3 +64,5 @@ from .client._client import AsyncClient
 
 
 from .client._values import _c
+
+from . import config
