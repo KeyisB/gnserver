@@ -103,7 +103,7 @@ class AsyncClient:
 
         self._dns_inflight: Dict[str, asyncio.Future] = {}
 
-        self._rcms_id: Optional[int] = None
+        self._rcms_id: int = 0
 
     def init(self,
              gn_crt: Union[bytes, str, Path, dict],
@@ -128,11 +128,7 @@ class AsyncClient:
             active_key_synchronization_callback_domainFilter
         )
 
-        if 'data' in self._gn_crt_data:
-            data = self._gn_crt_data['data']
-
-            if 'rcms_id' in data:
-                self._rcms_id = data['rcms_id']
+        self._rcms_id = self._gn_crt_data.get('rcms_id', 0)
 
     
     def setDomain(self, domain: str):
