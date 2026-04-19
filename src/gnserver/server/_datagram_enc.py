@@ -425,15 +425,23 @@ class QuicProtocolShell(QuicConnectionProtocol):
         # For encType 2 (PQ+TLS, no KDC) the server doesn't know the client's
         # GWIS domain, so we can't use the normal local/peer domain pair.
         # Both sides agree on: server_cert_domain + fixed marker "pq:anonymous".
-        #   client: local="pq:anonymous", peer=server_cert_domain
+        #   client: local="pq:anonymous", peer=server_cert_domain (from PQ certificate)
         #   server: local=server_cert_domain, peer="pq:anonymous"
         if connectionEnc.encryption_type == 2:
             is_client = getattr(self._quic, '_is_client', False)
-            server_cert_domain = connectionEnc.eEndpoint._kdc._client._domain
             if is_client:
+                # Get server cert domain from the PQ handshake certificate,
+                # NOT from peer_domain (which may be an IP for local connections).
+                tls_ctx = getattr(self._quic, 'tls', None)
+                pq_server_hello = getattr(tls_ctx, '_gn_pq_server_hello', None) if tls_ctx else None
+                if pq_server_hello is not None:
+                    server_cert_domain = pq_server_hello.server_certificate.name
+                else:
+                    server_cert_domain = peer_domain
                 eff_local = "pq:anonymous"
-                eff_peer = peer_domain  # server cert domain (set by client)
+                eff_peer = server_cert_domain
             else:
+                server_cert_domain = connectionEnc.eEndpoint._kdc._client._domain
                 eff_local = server_cert_domain
                 eff_peer = "pq:anonymous"
             connectionEnc.setSessionRoot64_receive_only(
@@ -443,7 +451,13 @@ class QuicProtocolShell(QuicConnectionProtocol):
             connectionEnc.setSessionRoot64_receive_only(established.root64, peer_domain)
         connectionEnc.domain = peer_domain
         asyncio.get_event_loop().call_soon(connectionEnc.applyPendingKeyOut)
-        _prequic_log(f"_apply_gn_pq_session_root OK: receive-side switched, send-side deferred for peer={peer_domain!r}")
+        if connectionEnc.encryption_type == 2:
+            _prequic_log(
+                f"_apply_gn_pq_session_root OK"
+                f"{peer_domain!r} {connectionEnc.encryption_type} {connectionEnc.keyid}"
+            )
+        else:
+            _prequic_log(f"_apply_gn_pq_session_root OK: receive-side switched, send-side deferred for peer={peer_domain!r}")
         return True
 
 
