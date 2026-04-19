@@ -413,8 +413,10 @@ class QuicProtocolShell(QuicConnectionProtocol):
 
         # Mid-connection upgrade from raw UDP framing would need an explicit epoch switch.
         # Only rekey already-encrypted pre-QUIC associations here.
-        if connectionEnc.encryption_type == 0:
-            _prequic_log(f"_apply_gn_pq_session_root skip: encryption_type=0 for peer={peer_domain!r}")
+        # encType 0: no PQ, no pre-QUIC encryption
+        # encType 2: PQ lives inside TLS, pre-QUIC stays plaintext (no KDC keys)
+        if connectionEnc.encryption_type == 0 or connectionEnc.encryption_type == 2:
+            _prequic_log(f"_apply_gn_pq_session_root skip: encryption_type={connectionEnc.encryption_type} for peer={peer_domain!r}")
             return False
 
         if connectionEnc.getSessionRoot64() == established.root64:

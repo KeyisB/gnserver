@@ -134,6 +134,7 @@ def _gn_pq_tls_handle_reassembled_message(
 class GNQuicClientSettings:
     server_domain: str
     kdc_key: Optional[bytes] = None
+    accept_any_server_domain: bool = False
 
 
 @dataclass(slots=True)
@@ -286,17 +287,19 @@ def _parse_server_certificate(crt_container: Any) -> GNPQServerCertificate:
     )
 
 
-def build_gn_pq_client_settings(server_domain: str, kdc_key: Optional[bytes] = None) -> Optional[GNQuicClientSettings]:
+def build_gn_pq_client_settings(server_domain: str, kdc_key: Optional[bytes] = None, accept_any_server_domain: bool = False) -> Optional[GNQuicClientSettings]:
     if not has_gn_pq_ca_public_keys():
         _gn_pq_log(f"client settings disabled for {server_domain!r}: no GN PQ CA keys loaded")
         return None
 
     _gn_pq_log(
-        f"client settings enabled for {server_domain!r} kdc_key={'set' if kdc_key is not None else 'none'}"
+        f"client settings enabled for {server_domain!r} kdc_key={'set' if kdc_key is not None else 'none'} "
+        f"accept_any_domain={accept_any_server_domain}"
     )
     return GNQuicClientSettings(
         server_domain=server_domain,
         kdc_key=kdc_key,
+        accept_any_server_domain=accept_any_server_domain,
     )
 
 
@@ -528,8 +531,16 @@ def _gn_pq_client_handle_finished(self: tls.Context, input_buf: Buffer, output_b
     )
 
     try:
+        effective_domain = settings.server_domain
+        if settings.accept_any_server_domain:
+            effective_domain = server_hello.server_certificate.name
+            _gn_pq_log(
+                f"client accept_any_server_domain: using certificate domain {effective_domain!r} "
+                f"instead of {settings.server_domain!r}"
+            )
+
         completion: GNPQClientCompletion = complete_client_handshake(
-            local_server_domain=settings.server_domain,
+            local_server_domain=effective_domain,
             client_state=client_state,
             server_hello=server_hello,
             ca_public_key=ca_public_key,

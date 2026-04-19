@@ -906,6 +906,7 @@ class QuicClient:
             gn_pq_client_settings = build_gn_pq_client_settings(
                 self.domain,
                 kdc_key=None,
+                accept_any_server_domain=True,
             )
 
         logger.debug(
