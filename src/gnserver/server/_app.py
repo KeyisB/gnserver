@@ -731,7 +731,7 @@ class App:
             """
             await self._resolve_dev_transport_response(response, request)
 
-            logger.debug(f'[>] [{request.client.domain}] Response: {request.method} {request.url} -> {response.command}')
+            logger.info(f'[>] [{request.client.domain}] Response: {request.method} {request.url} -> {response.command}')
 
             if request.stream_id not in self._quic._streams:
                 logger.warning(f"Stream {request.stream_id} not found for response, skipping send")

@@ -339,7 +339,7 @@ class AsyncClient:
                     else:
                         r = GNResponse(str(e), payload=traceback.format_exc())
 
-            logger.debug(f'Response: {request.method} {request.url} -> {r.command}')
+            logger.info(f'[<] Response: {request.method} {request.url} -> {r.command}')
 
             for f in self.__response_callbacks.values():
                 asyncio.create_task(f(r))
