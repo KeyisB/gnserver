@@ -4,21 +4,22 @@ import logging
 import sys
 
 logConfig = {
+    'level': 'DEBUG',
     'loggers': {
         'GNServer': {
-            'level': 'INFO'
+            'level': 'DEBUG'
         },
         'GNServer.DatagramEndpoint': {
-            'level': 'INFO'
+            'level': 'DEBUG'
         },
         "GNServer.Client": {
-            'level': 'INFO'
+            'level': 'DEBUG'
         },
         "GNServer.DatagramEndpoint.KDC": {
-            'level': 'INFO'
+            'level': 'DEBUG'
         },
         "GNServer.DatagramEndpoint.PQ": {
-            'level': 'INFO'
+            'level': 'DEBUG'
         }
     }
 }

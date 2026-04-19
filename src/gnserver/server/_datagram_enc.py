@@ -140,7 +140,7 @@ class ConnectionEncryptor:
             f"key_out_fp={hashlib.sha3_256(key_out).hexdigest()[:16]}"
         )
 
-    def setSessionRoot64_receive_only(self, root64: bytes, peer_domain: str) -> None:
+    def setSessionRoot64_receive_only(self, root64: bytes, peer_domain: str, *, local_domain: str | None = None) -> None:
         """Immediately update _key_in for PQ decryption while keeping old _key_out.
 
         This is used during the handshake-to-PQ transition: the receiving side
@@ -149,7 +149,7 @@ class ConnectionEncryptor:
         remote peer has time to prepare its own _key_in.
         """
         import hashlib
-        self_domain = self.eEndpoint._kdc._client._domain
+        self_domain = local_domain if local_domain is not None else self.eEndpoint._kdc._client._domain
         key_in, key_out = derive_transport_keys_from_root64(
             root64,
             local_domain=self_domain,
@@ -242,6 +242,7 @@ class ConnectionEncryptor:
         self.keyid = (250, 0)
         self._session_root64 = None
         self.ready = True
+        self.domain = self.eEndpoint._domain
         _prequic_log(f"initType2 success local_domain={self.eEndpoint._domain!r} state={self.debug_state()}")
 
     
@@ -413,17 +414,33 @@ class QuicProtocolShell(QuicConnectionProtocol):
 
         # Mid-connection upgrade from raw UDP framing would need an explicit epoch switch.
         # Only rekey already-encrypted pre-QUIC associations here.
-        # encType 0: no PQ, no pre-QUIC encryption
-        # encType 2: PQ lives inside TLS, pre-QUIC stays plaintext (no KDC keys)
-        if connectionEnc.encryption_type == 0 or connectionEnc.encryption_type == 2:
-            _prequic_log(f"_apply_gn_pq_session_root skip: encryption_type={connectionEnc.encryption_type} for peer={peer_domain!r}")
+        if connectionEnc.encryption_type == 0:
+            _prequic_log(f"_apply_gn_pq_session_root skip: encryption_type=0 for peer={peer_domain!r}")
             return False
 
         if connectionEnc.getSessionRoot64() == established.root64:
             _prequic_log(f"_apply_gn_pq_session_root skip: root64 already set for peer={peer_domain!r}")
             return True
 
-        connectionEnc.setSessionRoot64_receive_only(established.root64, peer_domain)
+        # For encType 2 (PQ+TLS, no KDC) the server doesn't know the client's
+        # GWIS domain, so we can't use the normal local/peer domain pair.
+        # Both sides agree on: server_cert_domain + fixed marker "pq:anonymous".
+        #   client: local="pq:anonymous", peer=server_cert_domain
+        #   server: local=server_cert_domain, peer="pq:anonymous"
+        if connectionEnc.encryption_type == 2:
+            is_client = getattr(self._quic, '_is_client', False)
+            server_cert_domain = connectionEnc.eEndpoint._kdc._client._domain
+            if is_client:
+                eff_local = "pq:anonymous"
+                eff_peer = peer_domain  # server cert domain (set by client)
+            else:
+                eff_local = server_cert_domain
+                eff_peer = "pq:anonymous"
+            connectionEnc.setSessionRoot64_receive_only(
+                established.root64, eff_peer, local_domain=eff_local
+            )
+        else:
+            connectionEnc.setSessionRoot64_receive_only(established.root64, peer_domain)
         connectionEnc.domain = peer_domain
         asyncio.get_event_loop().call_soon(connectionEnc.applyPendingKeyOut)
         _prequic_log(f"_apply_gn_pq_session_root OK: receive-side switched, send-side deferred for peer={peer_domain!r}")
@@ -1066,7 +1083,11 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
             connectionEnc.not_ready_queue.put_nowait((data, addr))
             return
 
+        print(connectionEnc.domain, connectionEnc.encryption_type, connectionEnc.keyid)
         if connectionEnc.encryption_type != 0 and connectionEnc.hasTransportKeys():
+            try:
+                print(connectionEnc._key_in, connectionEnc._key_out)
+            except: pass
             try:
                 enc = connectionEnc.encrypt(data)
             except Exception:
