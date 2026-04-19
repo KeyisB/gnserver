@@ -237,13 +237,26 @@ class ConnectionEncryptor:
         self.ready = True
         _prequic_log(f"initRaw success local_domain={self.eEndpoint._domain!r} state={self.debug_state()}")
 
-    async def initType2(self):
+    async def initType2(self, *, is_server: bool = False):
         self.encryption_type = 2
         self.keyid = (250, 0)
         self._session_root64 = None
+
+        if is_server:
+            local_marker, peer_marker = 'pq:server', 'pq:client'
+        else:
+            local_marker, peer_marker = 'pq:client', 'pq:server'
+
+        key_in, key_out = _derive_bootstrap_transport_keys(
+            b'',
+            local_domain=local_marker,
+            peer_domain=peer_marker,
+        )
+        self._set_transport_keys(key_in, key_out)
+
         self.ready = True
         self.domain = self.eEndpoint._domain
-        _prequic_log(f"initType2 success local_domain={self.eEndpoint._domain!r} state={self.debug_state()}")
+        _prequic_log(f"initType2 success is_server={is_server} local_domain={self.eEndpoint._domain!r} state={self.debug_state()}")
 
     
     async def initByDomain(self, encryption_type: int, domain: str) -> tuple[int, int]:
@@ -792,7 +805,7 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
         return d
 
     async def _init_pq_initial_connection(self, connectionEnc: ConnectionEncryptor, maddr: Tuple[str, int, int]) -> str:
-        await connectionEnc.initType2()
+        await connectionEnc.initType2(is_server=True)
         d = Url.ip_and_port_to_ipv6_with_port(maddr[0], maddr[1])
         connectionEnc.domain = d
         _prequic_log(f"_init_pq_initial_connection success addr={maddr} domain={d!r} state={connectionEnc.debug_state()}")
