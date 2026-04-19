@@ -18,6 +18,7 @@ from asyncio import Queue
 from aioquic.quic.packet import pull_quic_header
 from aioquic.buffer import Buffer
 import asyncio
+import hashlib
 from typing import Optional, Callable, Tuple
 from aioquic.asyncio.protocol import QuicConnectionProtocol
 from aioquic.quic.connection import QuicConnection
@@ -124,7 +125,6 @@ class ConnectionEncryptor:
         return self._session_root64
 
     def setSessionRoot64(self, root64: bytes, peer_domain: str) -> None:
-        import hashlib
         self_domain = self.eEndpoint._kdc._client._domain
         key_in, key_out = derive_transport_keys_from_root64(
             root64,
@@ -148,7 +148,6 @@ class ConnectionEncryptor:
         sending side keeps the old key until the next event-loop tick so the
         remote peer has time to prepare its own _key_in.
         """
-        import hashlib
         self_domain = local_domain if local_domain is not None else self.eEndpoint._kdc._client._domain
         key_in, key_out = derive_transport_keys_from_root64(
             root64,
@@ -256,7 +255,11 @@ class ConnectionEncryptor:
 
         self.ready = True
         self.domain = self.eEndpoint._domain
-        _prequic_log(f"initType2 success is_server={is_server} local_domain={self.eEndpoint._domain!r} state={self.debug_state()}")
+        _prequic_log(
+            f"initType2 success is_server={is_server} local_domain={self.eEndpoint._domain!r} "
+            f"key_in_fp={hashlib.sha3_256(key_in).hexdigest()[:16]} key_out_fp={hashlib.sha3_256(key_out).hexdigest()[:16]} "
+            f"state={self.debug_state()}"
+        )
 
     
     async def initByDomain(self, encryption_type: int, domain: str) -> tuple[int, int]:
@@ -1140,6 +1143,10 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
         if effective_encryption_type != 0 and connectionEnc.hasTransportKeys():
             try:
                 enc = connectionEnc.encrypt(data)
+                _prequic_log(
+                    f"async_sendto initial ENCRYPTED addr={maddr} plaintext_len={len(data)} cipher_len={len(enc)} "
+                    f"key_out_fp={hashlib.sha3_256(connectionEnc._key_out).hexdigest()[:16]} state={connectionEnc.debug_state()}"
+                )
             except Exception:
                 _prequic_log(
                     f"async_sendto initial encryption failed addr={maddr} effective_enc={effective_encryption_type} "
@@ -1148,6 +1155,11 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
                 return
         else:
             enc = data
+            _prequic_log(
+                f"async_sendto initial PLAINTEXT addr={maddr} len={len(data)} "
+                f"effective_enc={effective_encryption_type} has_keys={connectionEnc.hasTransportKeys()} "
+                f"state={connectionEnc.debug_state()}"
+            )
 
         dg = p + enc
         _prequic_log(f"async_sendto sendMapped addr={maddr} datagram_len={len(dg)} state={connectionEnc.debug_state()}")
@@ -1242,7 +1254,11 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
                     # Only refresh when the transport association itself changes.
 
                     if encryption_type == 2: # PQ only (no KDC)
-                        if connectionEnc.encryption_type != 2:
+                        # Server: reinitialize bootstrap keys (a new client
+                        # connection after PQ rekey needs fresh bootstrap keys).
+                        # Client: keep existing keys — the server's initial
+                        # response must be decrypted with the SAME key pair.
+                        if connectionEnc.encryption_type != 2 or isinstance(self._quic_routing, QuicServer):
                             d = await self._init_pq_initial_connection(connectionEnc, maddr)
                         else:
                             d = connectionEnc.domain
@@ -1287,12 +1303,13 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
                 dec = connectionEnc.decrypt(datagram)
                 
             except Exception as e:
-                import hashlib
                 key_in_fp = hashlib.sha3_256(connectionEnc._key_in).hexdigest()[:16] if hasattr(connectionEnc, '_key_in') else 'none'
                 prev_fp = hashlib.sha3_256(connectionEnc._prev_key_in).hexdigest()[:16] if hasattr(connectionEnc, '_prev_key_in') and connectionEnc._prev_key_in else 'none'
                 root64_fp = hashlib.sha3_256(connectionEnc._session_root64).hexdigest()[:16] if connectionEnc._session_root64 else 'none'
+                # Check if the payload looks like a plaintext QUIC packet (bit 6 "fixed bit" set)
+                looks_plaintext = len(datagram) > 0 and (datagram[0] & 0x40) != 0
                 logger.error(
-                    f"UDP: UPD Decryption error: {e}"
+                    f"UDP: UPD Decryption error: {e} datagram_len={len(datagram)} first4={datagram[:4].hex() if len(datagram) >= 4 else 'short'} looks_quic_plaintext={looks_plaintext}"
                     f'info:\naddr: {addr}\n'
                     f'{connectionEnc.domain}'
                     f'{connectionEnc.keyid}'
