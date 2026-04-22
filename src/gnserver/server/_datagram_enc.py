@@ -174,6 +174,9 @@ class ConnectionEncryptor:
             self._pending_key_out = None
             _prequic_log(f"applyPendingKeyOut applied for domain={self.domain!r}")
 
+    def hasPendingKeyOut(self) -> bool:
+        return getattr(self, '_pending_key_out', None) is not None
+
     def hasTransportKeys(self) -> bool:
         return hasattr(self, '_key_in') and hasattr(self, '_key_out')
 
@@ -322,6 +325,8 @@ class ConnectionEncryptor:
             cipher = AES.new(self._key_in, AES.MODE_OCB, nonce=nonce, mac_len=16)
             result = cipher.decrypt_and_verify(ciphertext, tag)
             if self._prev_key_in is not None:
+                if self.hasPendingKeyOut():
+                    self.applyPendingKeyOut()
                 self._prev_key_in = None
             return result
         except Exception:
@@ -468,7 +473,12 @@ class QuicProtocolShell(QuicConnectionProtocol):
         else:
             connectionEnc.setSessionRoot64_receive_only(established.root64, peer_domain)
         connectionEnc.domain = peer_domain
-        asyncio.get_event_loop().call_soon(connectionEnc.applyPendingKeyOut)
+        if getattr(self._quic, '_is_client', False):
+            _prequic_log(
+                f"_apply_gn_pq_session_root client deferred send-side switch until inbound new-key packet for peer={peer_domain!r}"
+            )
+        else:
+            asyncio.get_event_loop().call_soon(connectionEnc.applyPendingKeyOut)
         if connectionEnc.encryption_type == 2:
             _prequic_log(
                 f"_apply_gn_pq_session_root OK"
