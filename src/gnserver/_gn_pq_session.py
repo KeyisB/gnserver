@@ -34,6 +34,7 @@ _TRANSCRIPT_HASH_INFO: Final[bytes] = b"gn:pq:transcript:v1"
 _KDC_MIX_INFO: Final[bytes] = b"gn:pq:kdc-mix:v1"
 _SESSION_ROOT_INFO: Final[bytes] = b"gn:pq:session-root:v1"
 _SERVER_SIGNATURE_CONTEXT: Final[bytes] = b"gn:pq:s1-sign:v2"
+_CLIENT_SIGNATURE_CONTEXT: Final[bytes] = b"gn:pq:c1-sign:v1"
 _TRANSPORT_KEYS_INFO: Final[bytes] = b"gn:DgEncryptor:root64:v1"
 _COMMIT_TAG_INFO: Final[bytes] = b"gn:pq:commit:v1"
 
@@ -388,6 +389,23 @@ def build_server_signature_message(local_server_domain: str, client_hello_payloa
         + build_domain_binding(local_server_domain)
         + _sha3_512(client_hello_payload)
         + _sha3_512(server_hello_unsigned)
+    )
+
+
+def build_client_signature_message(
+    local_client_domain: str,
+    client_hello_payload: bytes,
+    server_hello_payload: bytes,
+    client_finish_payload: bytes,
+    client_certificate_unsigned: bytes,
+) -> bytes:
+    return (
+        _CLIENT_SIGNATURE_CONTEXT
+        + build_domain_binding(local_client_domain)
+        + _sha3_512(client_hello_payload)
+        + _sha3_512(server_hello_payload)
+        + _sha3_512(client_finish_payload)
+        + _sha3_512(client_certificate_unsigned)
     )
 
 

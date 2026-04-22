@@ -590,9 +590,54 @@ class App:
             
             asyncio.create_task(self._api.dispatchEvent('disconnect', domain=self._domain, L5_reason=reason))
 
+        def _get_connection_encryptor(self):
+            if self._peer_maddr is None:
+                network_paths = getattr(self._quic, "_network_paths", None)
+                if network_paths:
+                    addr = network_paths[0].addr
+                    self._peer_maddr = DatagramEndpoint.from_addr_to_maddr(addr)
+
+            if self._peer_maddr is None:
+                return None
+
+            return self.datagramEndpoint.x_maddr_dgEnc.get(self._peer_maddr)
+
+        def _get_pq_client_domain(self) -> Optional[str]:
+            tls_context = getattr(self._quic, 'tls', None)
+            if tls_context is None:
+                return None
+
+            client_domain = getattr(tls_context, '_gn_pq_authenticated_client_domain', None)
+            if isinstance(client_domain, str) and client_domain:
+                return client_domain
+            return None
+
         def _refresh_domain(self) -> Optional[str]:
             if self._domain is None:
                 self._domain = cast(Optional[str], self.datagramEndpoint.getDomain(self))
+
+            connection_enc = self._get_connection_encryptor()
+            pq_client_domain = self._get_pq_client_domain()
+            if (
+                connection_enc is not None
+                and connection_enc.encryption_type == 2
+                and pq_client_domain is not None
+                and self._domain != pq_client_domain
+            ):
+                previous_domain = self._domain
+                self._domain = pq_client_domain
+                connection_enc.domain = pq_client_domain
+
+                odcid = getattr(self._quic, 'original_destination_connection_id', None)
+                if odcid is not None:
+                    self.datagramEndpoint.x_cid_domain[odcid] = pq_client_domain
+
+                if previous_domain is not None and self._api.connections.get(previous_domain) is self:
+                    self._api.connections.pop(previous_domain, None)
+
+                logger.debug(
+                    f"[DOMAIN] Applied GN PQ client domain: {previous_domain!r} -> {pq_client_domain!r}"
+                )
 
             if self._domain is None:
                 network_paths = getattr(self._quic, "_network_paths", None)

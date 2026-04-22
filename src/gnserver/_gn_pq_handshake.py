@@ -26,6 +26,7 @@ from ._gn_pq_session import (
     GNPQServerHello,
     build_commit_payload,
     build_certificate_signature_message,
+    build_client_signature_message,
     build_server_signature_message,
     build_transcript_hash,
     derive_session_root64,
@@ -210,16 +211,17 @@ def issue_server_certificate(
     )
 
 
-def verify_server_certificate(
+def _verify_pq_certificate(
     *,
-    expected_server_domain: str,
+    expected_domain: str,
     certificate: GNPQServerCertificate,
     ca_public_key: bytes,
     ca_signature_algorithm: str = GN_PQ_SIGNATURE_ALGORITHM,
     now_timestamp: Optional[datetime.datetime] = None,
+    peer_role: str,
 ) -> None:
-    if certificate.name != expected_server_domain:
-        raise ValueError("Server certificate name mismatch")
+    if certificate.name != expected_domain:
+        raise ValueError(f"{peer_role.capitalize()} certificate name mismatch")
 
     if now_timestamp is None:
         now_timestamp = datetime.datetime.now(datetime.timezone.utc)
@@ -228,7 +230,7 @@ def verify_server_certificate(
     else:
         now_timestamp = now_timestamp.astimezone(datetime.timezone.utc)
     if now_timestamp > certificate.expires_at:
-        raise ValueError("Server certificate expired")
+        raise ValueError(f"{peer_role.capitalize()} certificate expired")
 
     unsigned_raw = certificate.unsigned_bytes()
     certificate_message = build_certificate_signature_message(unsigned_raw)
@@ -236,7 +238,7 @@ def verify_server_certificate(
     canonical_valid: Optional[bool] = None
 
     _gn_pq_handshake_log(
-        f"verify_server_certificate start server={certificate.name!r} "
+        f"verify_{peer_role}_certificate start {peer_role}={certificate.name!r} "
         f"ca={certificate.center_domain!r}#{certificate.center_key_version} "
         f"source_data={source_data is not None} "
         f"unsigned_len={len(unsigned_raw)} "
@@ -251,7 +253,7 @@ def verify_server_certificate(
     oqs_ca_signature_algorithm = get_oqs_gn_pq_signature_algorithm_name(ca_signature_algorithm)
     with Signature(oqs_ca_signature_algorithm) as ca_sig:
         source_valid = ca_sig.verify(certificate_message, certificate.signature, ca_public_key)
-        _gn_pq_handshake_log(f"verify_server_certificate source_valid={source_valid}")
+        _gn_pq_handshake_log(f"verify_{peer_role}_certificate source_valid={source_valid}")
 
         if not source_valid and source_data is not None:
             canonical_certificate = GNPQServerCertificate(
@@ -265,13 +267,13 @@ def verify_server_certificate(
             canonical_message = build_certificate_signature_message(canonical_certificate.unsigned_bytes())
             canonical_eq = canonical_message == certificate_message
             _gn_pq_handshake_log(
-                f"verify_server_certificate canonical check: "
+                f"verify_{peer_role}_certificate canonical check: "
                 f"canonical_msg_len={len(canonical_message)} canonical_eq_source={canonical_eq} "
                 f"canonical_head={canonical_message[:16].hex()}"
             )
             if not canonical_eq:
                 canonical_valid = ca_sig.verify(canonical_message, certificate.signature, ca_public_key)
-                _gn_pq_handshake_log(f"verify_server_certificate canonical_valid={canonical_valid}")
+                _gn_pq_handshake_log(f"verify_{peer_role}_certificate canonical_valid={canonical_valid}")
 
         if not source_valid:
             expected_public_key_len, _, expected_signature_len = get_gn_pq_signature_artifact_lengths(
@@ -282,8 +284,8 @@ def verify_server_certificate(
             sig_fp = _sha3_256_hex(certificate.signature)
             unsigned_fp = _sha3_256_hex(unsigned_raw)
             _gn_pq_handshake_log(
-                "verify server certificate FAILED "
-                f"server={certificate.name!r} ca={certificate.center_domain!r}#{certificate.center_key_version} "
+                f"verify {peer_role} certificate FAILED "
+                f"{peer_role}={certificate.name!r} ca={certificate.center_domain!r}#{certificate.center_key_version} "
                 f"source_data={source_data is not None} canonical_valid={canonical_valid} "
                 f"ca_key_len={len(ca_public_key)}/{expected_public_key_len} "
                 f"sig_len={len(certificate.signature)}/{expected_signature_len} "
@@ -294,7 +296,43 @@ def verify_server_certificate(
                 f"unsigned_fp={unsigned_fp[:16]} "
                 f"ca_key_head={ca_public_key[:8].hex()}"
             )
-            raise ValueError("Invalid CA signature on server certificate")
+            raise ValueError(f"Invalid CA signature on {peer_role} certificate")
+
+
+def verify_server_certificate(
+    *,
+    expected_server_domain: str,
+    certificate: GNPQServerCertificate,
+    ca_public_key: bytes,
+    ca_signature_algorithm: str = GN_PQ_SIGNATURE_ALGORITHM,
+    now_timestamp: Optional[datetime.datetime] = None,
+) -> None:
+    _verify_pq_certificate(
+        expected_domain=expected_server_domain,
+        certificate=certificate,
+        ca_public_key=ca_public_key,
+        ca_signature_algorithm=ca_signature_algorithm,
+        now_timestamp=now_timestamp,
+        peer_role="server",
+    )
+
+
+def verify_client_certificate(
+    *,
+    expected_client_domain: str,
+    certificate: GNPQServerCertificate,
+    ca_public_key: bytes,
+    ca_signature_algorithm: str = GN_PQ_SIGNATURE_ALGORITHM,
+    now_timestamp: Optional[datetime.datetime] = None,
+) -> None:
+    _verify_pq_certificate(
+        expected_domain=expected_client_domain,
+        certificate=certificate,
+        ca_public_key=ca_public_key,
+        ca_signature_algorithm=ca_signature_algorithm,
+        now_timestamp=now_timestamp,
+        peer_role="client",
+    )
 
 
 @dataclass(slots=True)

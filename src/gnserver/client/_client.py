@@ -179,13 +179,13 @@ class AsyncClient:
                         if self._active_connections.get(domain) is current:
                             await self.disconnect(domain)
                         raise AllGNFastCommands.transport.ConnectionError(
-                            f'Не удалось подключится к серверу {domain}'
+                            {'info': f'Не удалось подключится к серверу {domain}', 'traceback': traceback.format_exc()}
                         )
                     except Exception:
                         if self._active_connections.get(domain) is current:
                             await self.disconnect(domain)
                         raise AllGNFastCommands.transport.ConnectionError(
-                            f'Не удалось подключится к серверу {domain}'
+                            {'info': f'Не удалось подключится к серверу {domain}', 'traceback': traceback.format_exc()}
                         )
 
                     if current.status == 'active' and current._quik_core is not None:
@@ -193,13 +193,13 @@ class AsyncClient:
 
                     if current.status == 'disconnect':
                         raise AllGNFastCommands.transport.ConnectionError(
-                            f'Не удалось подключится к серверу {domain}'
+                            {'info': f'Не удалось подключится к серверу {domain}', 'traceback': traceback.format_exc()}
                         )
 
                     if self._active_connections.get(domain) is current:
                         await self.disconnect(domain)
                     raise AllGNFastCommands.transport.ConnectionError(
-                        f'Не удалось подключится к серверу {domain}'
+                        {'info': f'Не удалось подключится к серверу {domain}', 'traceback': traceback.format_exc()}
                     )
 
                 await _acquire_connect_lock()
@@ -223,7 +223,7 @@ class AsyncClient:
                 connect_lock.release()
 
         if not creator:
-            raise AllGNFastCommands.transport.ConnectionError(f'Не удалось подключится к серверу {domain}')
+            raise AllGNFastCommands.transport.ConnectionError({'info': f'Не удалось подключится к серверу {domain}', 'traceback': traceback.format_exc()})
 
         data = await self.getDNS(domain, host=domain if request.url.isIp else None)
 
@@ -245,10 +245,10 @@ class AsyncClient:
             raise AllGNFastCommands.transport.QuicHandshakeTimeout(f'Не удалось подключится к серверу {domain} (таймаут рукопожатия)')
         except asyncio.exceptions.CancelledError:
             await self.disconnect(domain)
-            raise AllGNFastCommands.transport.ConnectionError(f'Не удалось подключится к серверу {domain}')
+            raise AllGNFastCommands.transport.ConnectionError({'info': f'Не удалось подключится к серверу {domain}', 'traceback': traceback.format_exc()})
         except:
             await self.disconnect(domain)
-            raise AllGNFastCommands.transport.ConnectionError(f'Не удалось подключится к серверу {domain}')
+            raise AllGNFastCommands.transport.ConnectionError({'info': f'Не удалось подключится к серверу {domain}', 'traceback': traceback.format_exc()})
 
         try:
             await c.connect_future
@@ -901,12 +901,16 @@ class QuicClient:
             gn_pq_client_settings = build_gn_pq_client_settings(
                 self.domain,
                 kdc_key=gn_pq_kdc_key,
+                client_domain=getattr(self._client, '_domain', None),
+                client_gn_crt=getattr(self._client, '_gn_crt_data', None),
             )
         else:  # encType >= 2 (PQ + TLS, no KDC)
             gn_pq_client_settings = build_gn_pq_client_settings(
                 self.domain,
                 kdc_key=None,
                 accept_any_server_domain=True,
+                client_domain=getattr(self._client, '_domain', None),
+                client_gn_crt=getattr(self._client, '_gn_crt_data', None),
             )
 
         logger.debug(
@@ -947,7 +951,7 @@ class QuicClient:
         except Exception as e:
             logger.error(f'Error connecting: {e}')
             if not self.connect_future.done():
-                self.connect_future.set_exception(AllGNFastCommands.transport.ConnectionError('Не удалось подключится к серверу'))
+                self.connect_future.set_exception(AllGNFastCommands.transport.ConnectionError({'info': f'Не удалось подключится к серверу {self.domain}', 'traceback': traceback.format_exc()}))
             await self._client_cm.__aexit__(None, None, None)
 
     async def disconnect(self):

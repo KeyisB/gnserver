@@ -22,6 +22,7 @@ from aioquic.quic.packet import (
     pull_quic_header,
 )
 import aioquic.quic.configuration as quic_configuration
+from .oqs import Signature
 
 from ._ctr_ca_pub import get_gn_pq_ca_public_key, has_gn_pq_ca_public_keys
 from ._gn_pq_handshake import (
@@ -31,12 +32,15 @@ from ._gn_pq_handshake import (
     GNPQEstablishedState,
     _sha3_256_hex,
     build_client_handshake,
+    build_client_signature_message,
     build_server_handshake,
     complete_client_handshake,
     complete_server_handshake,
     get_default_gn_pq_signature_algorithm_name,
     get_gn_pq_signature_artifact_lengths,
+    get_oqs_gn_pq_signature_algorithm_name,
     normalize_gn_pq_signature_algorithm_name,
+    verify_client_certificate,
 )
 from ._gn_pq_session import (
     GNPQClientFinish,
@@ -51,6 +55,10 @@ logger = logging.getLogger("GNServer.DatagramEndpoint.PQ")
 
 GN_PQ_CLIENT_HELLO_EXTENSION_TYPE = 0xFF80
 GN_PQ_SERVER_HELLO_EXTENSION_TYPE = 0xFF81
+GN_PQ_CLIENT_DOMAIN_EXTENSION_TYPE = 0xFF82
+GN_PQ_CLIENT_FINISH_EXTENSION_TYPE = 0xFF83
+GN_PQ_CLIENT_SIGNATURE_ALGORITHM_EXTENSION_TYPE = 0xFF84
+GN_PQ_CLIENT_SIGNATURE_EXTENSION_TYPE = 0xFF85
 
 
 def _gn_pq_log(message: str) -> None:
@@ -135,6 +143,8 @@ class GNQuicClientSettings:
     server_domain: str
     kdc_key: Optional[bytes] = None
     accept_any_server_domain: bool = False
+    client_domain: Optional[str] = None
+    client_identity: Optional[GNPQCertifiedServerIdentity] = None
 
 
 @dataclass(slots=True)
@@ -287,19 +297,71 @@ def _parse_server_certificate(crt_container: Any) -> GNPQServerCertificate:
     )
 
 
-def build_gn_pq_client_settings(server_domain: str, kdc_key: Optional[bytes] = None, accept_any_server_domain: bool = False) -> Optional[GNQuicClientSettings]:
+def _extract_gn_pq_identity(gn_server_crt: dict) -> GNPQCertifiedServerIdentity:
+    if not isinstance(gn_server_crt, dict):
+        raise ValueError("gn_server_crt must be a dict")
+
+    domain = gn_server_crt.get("domain")
+    if not isinstance(domain, str) or not domain:
+        raise ValueError("gn_server_crt.domain must be a non-empty string")
+
+    crypto = gn_server_crt.get("crypto")
+    if not isinstance(crypto, dict):
+        raise ValueError("gn_server_crt.crypto must be a dict")
+
+    crt_container = crypto.get("crt")
+    if not isinstance(crt_container, dict):
+        raise ValueError("gn_server_crt.crypto.crt must be a dict")
+
+    certificate = _parse_server_certificate(crt_container)
+    if certificate.name != domain:
+        raise ValueError("gn_server_crt.domain must match gn_server_crt.crypto.crt.data.domain")
+
+    return GNPQCertifiedServerIdentity(
+        certificate=certificate,
+        private_keys=_parse_crt_private_keys(crt_container),
+    )
+
+
+def build_gn_pq_client_settings(
+    server_domain: str,
+    kdc_key: Optional[bytes] = None,
+    accept_any_server_domain: bool = False,
+    client_domain: Optional[str] = None,
+    client_gn_crt: Optional[dict] = None,
+) -> Optional[GNQuicClientSettings]:
     if not has_gn_pq_ca_public_keys():
         _gn_pq_log(f"client settings disabled for {server_domain!r}: no GN PQ CA keys loaded")
         return None
 
+    client_identity: Optional[GNPQCertifiedServerIdentity] = None
+    if client_gn_crt is not None:
+        client_identity = _extract_gn_pq_identity(client_gn_crt)
+        cert_domain = client_identity.certificate.name
+        if client_domain is None:
+            client_domain = cert_domain
+        elif client_domain != cert_domain:
+            raise ValueError(
+                f"Configured client domain {client_domain!r} does not match GN PQ certificate domain {cert_domain!r}"
+            )
+    else:
+        if client_domain is not None:
+            _gn_pq_log(
+                f"client settings for {server_domain!r}: client_domain ignored because no client GN PQ certificate is configured"
+            )
+        client_domain = None
+
     _gn_pq_log(
         f"client settings enabled for {server_domain!r} kdc_key={'set' if kdc_key is not None else 'none'} "
-        f"accept_any_domain={accept_any_server_domain}"
+        f"accept_any_domain={accept_any_server_domain} client_domain={client_domain!r} "
+        f"client_identity={client_identity is not None}"
     )
     return GNQuicClientSettings(
         server_domain=server_domain,
         kdc_key=kdc_key,
         accept_any_server_domain=accept_any_server_domain,
+        client_domain=client_domain,
+        client_identity=client_identity,
     )
 
 
@@ -323,9 +385,8 @@ def extract_gn_pq_server_settings(gn_server_crt: dict) -> Optional[GNQuicServerS
     if kdc is not None and not isinstance(kdc, dict):
         raise ValueError("gn_server_crt.crypto.kdc must be a dict or None")
 
-    certificate = _parse_server_certificate(crt_container)
-    if certificate.name != server_domain:
-        raise ValueError("gn_server_crt.domain must match gn_server_crt.crypto.crt.data.domain")
+    server_identity = _extract_gn_pq_identity(gn_server_crt)
+    certificate = server_identity.certificate
 
     _gn_pq_log(
         f"server loaded certificate domain={server_domain!r} "
@@ -343,10 +404,7 @@ def extract_gn_pq_server_settings(gn_server_crt: dict) -> Optional[GNQuicServerS
 
     return GNQuicServerSettings(
         server_domain=server_domain,
-        server_identity=GNPQCertifiedServerIdentity(
-            certificate=certificate,
-            private_keys=_parse_crt_private_keys(crt_container),
-        ),
+        server_identity=server_identity,
         kdc_key=kdc_key,
     )
 
@@ -563,13 +621,59 @@ def _gn_pq_client_handle_finished(self: tls.Context, input_buf: Buffer, output_b
     )
 
     with tls.push_message(key_schedule, output_buf):
-        tls.push_certificate(
-            output_buf,
-            tls.Certificate(
-                request_context=self._certificate_request.request_context,
-                certificates=[(b"", completion.client_finish.to_bytes())],
-            ),
-        )
+        client_identity = settings.client_identity
+        if client_identity is None:
+            tls.push_certificate(
+                output_buf,
+                tls.Certificate(
+                    request_context=self._certificate_request.request_context,
+                    certificates=[(b"", completion.client_finish.to_bytes())],
+                ),
+            )
+        else:
+            client_signature_algorithm = get_default_gn_pq_signature_algorithm_name()
+            if client_signature_algorithm not in client_identity.private_keys:
+                raise tls.AlertHandshakeFailure(
+                    f"GN PQ client identity does not contain private key for {client_signature_algorithm}"
+                )
+
+            client_certificate = client_identity.certificate
+            signature_message = build_client_signature_message(
+                client_certificate.name,
+                client_state.client_hello.to_bytes(),
+                server_hello.to_bytes(),
+                completion.client_finish.to_bytes(),
+                client_certificate.unsigned_bytes(),
+            )
+            with Signature(
+                get_oqs_gn_pq_signature_algorithm_name(client_signature_algorithm),
+                secret_key=client_identity.private_keys[client_signature_algorithm],
+            ) as sig:
+                client_signature = sig.sign(signature_message)
+
+            client_auth_extensions = _encode_extension_list(
+                [
+                    (GN_PQ_CLIENT_FINISH_EXTENSION_TYPE, completion.client_finish.to_bytes()),
+                    (
+                        GN_PQ_CLIENT_SIGNATURE_ALGORITHM_EXTENSION_TYPE,
+                        client_signature_algorithm.encode("utf-8"),
+                    ),
+                    (GN_PQ_CLIENT_SIGNATURE_EXTENSION_TYPE, client_signature),
+                ]
+            )
+
+            _gn_pq_log(
+                f"client sending GN PQ certificate flight domain={client_certificate.name!r} "
+                f"sig_algo={client_signature_algorithm!r} sig_len={len(client_signature)}"
+            )
+
+            tls.push_certificate(
+                output_buf,
+                tls.Certificate(
+                    request_context=self._certificate_request.request_context,
+                    certificates=[(client_certificate.to_bytes(), client_auth_extensions)],
+                ),
+            )
 
     with tls.push_message(key_schedule, output_buf):
         tls.push_finished(
@@ -605,14 +709,28 @@ def _gn_pq_server_handle_hello(
 
     peer_hello = tls.pull_client_hello(Buffer(data=input_buf.data_slice(0, input_buf.capacity)))
     client_hello_payload = _find_extension(peer_hello.other_extensions, GN_PQ_CLIENT_HELLO_EXTENSION_TYPE)
+    client_domain_payload = _find_extension(peer_hello.other_extensions, GN_PQ_CLIENT_DOMAIN_EXTENSION_TYPE)
     if client_hello_payload is None:
         _gn_pq_log(f"server handle_hello: GN PQ client hello extension missing for {settings.server_domain!r}")
         tls.Context._server_handle_hello(self, input_buf, initial_buf, handshake_buf, onertt_buf)
         return
 
+    client_domain: Optional[str] = None
+    if client_domain_payload is not None:
+        try:
+            client_domain = client_domain_payload.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            _gn_pq_log(f"server handle_hello: invalid GN PQ client domain encoding: {exc}")
+            raise tls.AlertDecodeError("Invalid GN PQ client domain") from exc
+        if client_domain == "":
+            client_domain = None
+
+    self._gn_pq_client_claimed_domain = client_domain
+
     _gn_pq_log(
         "server handle_hello received client hello "
-        f"ext_len={len(client_hello_payload)} peer_extensions={len(peer_hello.other_extensions)}"
+        f"ext_len={len(client_hello_payload)} peer_extensions={len(peer_hello.other_extensions)} "
+        f"client_domain={client_domain!r}"
     )
 
     try:
@@ -909,11 +1027,68 @@ def _gn_pq_server_handle_certificate(self: tls.Context, input_buf: Buffer, outpu
         "server handle_certificate first_entry "
         f"der_len={len(certificate_data)} ext_len={len(certificate_extensions)}"
     )
-    if certificate_data != b"":
-        raise tls.AlertIllegalParameter("GN PQ client finish must not carry an X.509 certificate")
 
     try:
-        client_finish = GNPQClientFinish.from_bytes(certificate_extensions)
+        if certificate_data == b"":
+            client_finish = GNPQClientFinish.from_bytes(certificate_extensions)
+            _gn_pq_log("server handle_certificate legacy client flight without PQ client certificate")
+        else:
+            client_certificate = GNPQServerCertificate.from_bytes(certificate_data)
+            client_auth_extensions = _parse_extension_list(certificate_extensions)
+            client_finish_payload = _find_extension(client_auth_extensions, GN_PQ_CLIENT_FINISH_EXTENSION_TYPE)
+            signature_algorithm_payload = _find_extension(
+                client_auth_extensions,
+                GN_PQ_CLIENT_SIGNATURE_ALGORITHM_EXTENSION_TYPE,
+            )
+            client_signature = _find_extension(client_auth_extensions, GN_PQ_CLIENT_SIGNATURE_EXTENSION_TYPE)
+
+            if client_finish_payload is None or signature_algorithm_payload is None or client_signature is None:
+                raise ValueError("GN PQ client certificate flight is incomplete")
+
+            client_finish = GNPQClientFinish.from_bytes(client_finish_payload)
+            client_signature_algorithm = normalize_gn_pq_signature_algorithm_name(
+                signature_algorithm_payload.decode("utf-8")
+            )
+
+            claimed_domain = getattr(self, "_gn_pq_client_claimed_domain", None)
+            if claimed_domain is not None and claimed_domain != client_certificate.name:
+                raise ValueError("GN PQ client certificate name mismatch")
+
+            client_ca_public_key = get_gn_pq_ca_public_key(
+                client_certificate.center_domain,
+                client_certificate.center_key_version,
+            )
+            if client_ca_public_key is None:
+                raise ValueError(
+                    "Unknown GN PQ client CA key "
+                    f"{client_certificate.center_domain}#{client_certificate.center_key_version}"
+                )
+
+            verify_client_certificate(
+                expected_client_domain=client_certificate.name,
+                certificate=client_certificate,
+                ca_public_key=client_ca_public_key,
+                now_timestamp=tls.utcnow(),
+            )
+
+            client_signature_message = build_client_signature_message(
+                client_certificate.name,
+                server_state.client_hello.to_bytes(),
+                server_state.server_hello.to_bytes(),
+                client_finish.to_bytes(),
+                client_certificate.unsigned_bytes(),
+            )
+            client_public_key = client_certificate.get_public_key(client_signature_algorithm)
+            with Signature(get_oqs_gn_pq_signature_algorithm_name(client_signature_algorithm)) as sig:
+                if not sig.verify(client_signature_message, client_signature, client_public_key):
+                    raise ValueError("Invalid client ML-DSA signature in certificate flight")
+
+            self._gn_pq_authenticated_client_domain = client_certificate.name
+            _gn_pq_log(
+                f"server verified GN PQ client certificate domain={client_certificate.name!r} "
+                f"sig_algo={client_signature_algorithm!r}"
+            )
+
         _gn_pq_log(
             "server handle_certificate decoded client finish "
             f"ciphertext_len={len(client_finish.ml_kem_ciphertext)}"
@@ -934,7 +1109,8 @@ def _gn_pq_server_handle_certificate(self: tls.Context, input_buf: Buffer, outpu
     self._gn_pq_established = established
     _gn_pq_log(
         f"server handshake completed for {settings.server_domain!r} "
-        f"kdc_key={'set' if kdc_key is not None else 'none'}"
+        f"kdc_key={'set' if kdc_key is not None else 'none'} "
+        f"client_domain={getattr(self, '_gn_pq_authenticated_client_domain', None)!r}"
     )
     self._server_expect_finished(output_buf)
     _gn_pq_log(
@@ -957,6 +1133,8 @@ def _install_gn_pq_tls_hooks(
     context._gn_pq_server_hello = None
     context._gn_pq_established = None
     context._gn_pq_client_completion = None
+    context._gn_pq_client_claimed_domain = None
+    context._gn_pq_authenticated_client_domain = None
     context._gn_pq_quic_connection = quic_connection
     context._gn_pq_peer_kdc_key = None
 
@@ -1034,9 +1212,18 @@ class GNQuicConnection(QuicConnection):
                     client_hello_bytes,
                 )
             )
+            client_domain = self._gn_pq_client_settings.client_domain
+            if client_domain:
+                self.tls.handshake_extensions.append(
+                    (
+                        GN_PQ_CLIENT_DOMAIN_EXTENSION_TYPE,
+                        client_domain.encode("utf-8"),
+                    )
+                )
             _gn_pq_log(
                 "client prepared GN PQ hello "
-                f"server_domain={self._gn_pq_client_settings.server_domain!r} len={len(client_hello_bytes)}"
+                f"server_domain={self._gn_pq_client_settings.server_domain!r} len={len(client_hello_bytes)} "
+                f"client_domain={client_domain!r}"
             )
 
 

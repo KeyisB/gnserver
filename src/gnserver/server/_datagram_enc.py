@@ -438,28 +438,30 @@ class QuicProtocolShell(QuicConnectionProtocol):
             _prequic_log(f"_apply_gn_pq_session_root skip: root64 already set for peer={peer_domain!r}")
             return True
 
-        # For encType 2 (PQ+TLS, no KDC) the server doesn't know the client's
-        # GWIS domain, so we can't use the normal local/peer domain pair.
-        # Both sides agree on: server_cert_domain + fixed marker "pq:anonymous".
-        #   client: local="pq:anonymous", peer=server_cert_domain (from PQ certificate)
-        #   server: local=server_cert_domain, peer="pq:anonymous"
+        # For encType 2 (PQ+TLS, no KDC) prefer authenticated logical domains.
+        # If the client did not present a verified GN PQ certificate, keep the
+        # legacy anonymous marker so transport keys stay compatible.
         if connectionEnc.encryption_type == 2:
             is_client = getattr(self._quic, '_is_client', False)
+            tls_ctx = getattr(self._quic, 'tls', None)
             if is_client:
-                # Get server cert domain from the PQ handshake certificate,
-                # NOT from peer_domain (which may be an IP for local connections).
-                tls_ctx = getattr(self._quic, 'tls', None)
                 pq_server_hello = getattr(tls_ctx, '_gn_pq_server_hello', None) if tls_ctx else None
                 if pq_server_hello is not None:
                     server_cert_domain = pq_server_hello.server_certificate.name
                 else:
                     server_cert_domain = peer_domain
-                eff_local = "pq:anonymous"
+
+                client_settings = getattr(tls_ctx, '_gn_pq_client_settings', None) if tls_ctx else None
+                client_identity = getattr(client_settings, 'client_identity', None) if client_settings else None
+                verified_client_domain = client_identity.certificate.name if client_identity is not None else None
+
+                eff_local = verified_client_domain if verified_client_domain is not None else "pq:anonymous"
                 eff_peer = server_cert_domain
             else:
                 server_cert_domain = connectionEnc.eEndpoint._kdc._client._domain
+                verified_client_domain = getattr(tls_ctx, '_gn_pq_authenticated_client_domain', None) if tls_ctx else None
                 eff_local = server_cert_domain
-                eff_peer = "pq:anonymous"
+                eff_peer = verified_client_domain if verified_client_domain is not None else "pq:anonymous"
             connectionEnc.setSessionRoot64_receive_only(
                 established.root64, eff_peer, local_domain=eff_local
             )
@@ -1113,11 +1115,11 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
             connectionEnc.not_ready_queue.put_nowait((data, addr))
             return
 
-        print(connectionEnc.domain, connectionEnc.encryption_type, connectionEnc.keyid)
+        #print(connectionEnc.domain, connectionEnc.encryption_type, connectionEnc.keyid)
         if connectionEnc.encryption_type != 0 and connectionEnc.hasTransportKeys():
-            try:
-                print(connectionEnc._key_in, connectionEnc._key_out)
-            except: pass
+            # try:
+            #     print(connectionEnc._key_in, connectionEnc._key_out)
+            # except: pass
             try:
                 enc = connectionEnc.encrypt(data)
             except Exception:
