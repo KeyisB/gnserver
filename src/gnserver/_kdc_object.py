@@ -249,13 +249,13 @@ class KDCObject:
         else:
             return self._x_keyId_key.get(domain_or_keyId) # type: ignore
 
-    def getDomainById(self, keyId: int) -> Optional[str]:
+    def getDomainById(self, keyId: Tuple[int, int]) -> Optional[str]:
         for d, k in self._x_domain_keyId.items():
             if k == keyId:
                 return d
         return None
     
-    def getKeyIdByDomain(self, domain: str) -> Optional[int]:
+    def getKeyIdByDomain(self, domain: str) -> Optional[Tuple[int, int]]:
         return self._x_domain_keyId.get(domain) # type: ignore
 
     async def requestKeyIfNotExist(self, domain_or_keyId: Union[List[Union[str, Tuple[int, int]]], str, Tuple[int, int]]):

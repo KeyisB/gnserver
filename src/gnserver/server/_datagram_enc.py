@@ -603,6 +603,16 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
         if self._domain is None:
             return True
         return await self.DEPConfig.isKDCAllowedForDomain(self._domain)
+
+    async def _is_confirmed_kdc_domain_allowed(self, domain: Optional[str]) -> bool:
+        if domain is None:
+            return False
+        return await self.DEPConfig.isConfirmedKDCDomainAllowed(domain)
+
+    def _get_confirmed_kdc_domain(self, keyid: Tuple[int, int]) -> Optional[str]:
+        if self._kdc.getKey(keyid) is None:
+            return None
+        return self._kdc.getDomainById(keyid)
     
     def add_QuicProtocolShellServer_domain(self, data: bytes, domain: str):
         h = pull_quic_header(Buffer(data=data))
@@ -754,12 +764,20 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
         data: bytes,
         addr,
     ) -> Optional[str]:
-        if not await self._is_kdc_bootstrap_allowed_for_local_domain():
+        confirmed_domain = self._get_confirmed_kdc_domain(keyid)
+        confirmed_domain_allowed = await self._is_confirmed_kdc_domain_allowed(confirmed_domain)
+
+        if not confirmed_domain_allowed and not await self._is_kdc_bootstrap_allowed_for_local_domain():
             connectionEnc.ready = None
             raise AllGNFastCommands.transport.PolicyDenied({
                 'policy': 'kdc_allowed_domains',
                 'domain': self._domain,
             })
+
+        if confirmed_domain_allowed:
+            _prequic_log(
+                f"_init_encrypted_initial_connection confirmed-domain bypass keyid={keyid} domain={confirmed_domain!r}"
+            )
 
         if not self._kdc._active_key_synchronization:
             key = self._kdc.getKey(keyid)
@@ -778,7 +796,12 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
             return None
 
         d = await connectionEnc.initByKeyid(encryption_type, keyid)
-        if self.active_key_synchronization_callback_domain_filter is not None and not self.active_key_synchronization_callback_domain_filter.match_any(d) and not GNDomain.isCore(d):
+        if (
+            not confirmed_domain_allowed
+            and self.active_key_synchronization_callback_domain_filter is not None
+            and not self.active_key_synchronization_callback_domain_filter.match_any(d)
+            and not GNDomain.isCore(d)
+        ):
             connectionEnc.ready = None
             raise AllGNFastCommands.transport.PolicyDenied({
                 'domain': d,
@@ -1010,24 +1033,21 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
         if not self._inbound_started:
             self._start_inbound_workers()
 
-        # ── fast path: payload packet on warm connection ──
+        # ── fast path: payload packet on warm unencrypted connection ──
+        # Encrypted peers must stay on the worker path so per-peer processing
+        # remains serialized while bootstrap / PQ transport keys are changing.
         if len(data) > 1 and not (data[0] & 0x01):
             version = (data[0] >> 1) & 0x7F
             if version == self._gn_protocol_version:
                 maddr = self.from_addr_to_maddr(addr)
                 connectionEnc = self.x_maddr_dgEnc.get(maddr)
                 if connectionEnc is not None and connectionEnc.ready:
-                    if connectionEnc.encryption_type != 0 and connectionEnc.hasTransportKeys():
-                        try:
-                            dec = connectionEnc.decrypt(data[1:])
-                        except Exception:
-                            return
-                    else:
+                    if connectionEnc.encryption_type == 0:
                         dec = data[1:]
-                    self.__info_dg_count += 1
-                    self._quic_routing.datagram_received(dec, addr)
-                    self.__info_dg_count_s()
-                    return
+                        self.__info_dg_count += 1
+                        self._quic_routing.datagram_received(dec, addr)
+                        self.__info_dg_count_s()
+                        return
 
         # ── slow path: queue for async worker ──
         now = time.monotonic()

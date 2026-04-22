@@ -35,6 +35,36 @@ logger = logging.getLogger("GNServer.Client")
 
 
 
+def _build_transport_connection_error(
+    *,
+    domain: str,
+    source: str,
+    reason: Optional[str] = None,
+    error_code: Optional[int] = None,
+    error_name: Optional[str] = None,
+    frame_type: Optional[int] = None,
+    details: Optional[Dict[str, Any]] = None,
+) -> GNResponse:
+    payload: Dict[str, Any] = {
+        'domain': domain,
+        'source': source,
+    }
+
+    if reason:
+        payload['reason'] = reason
+    if error_code is not None:
+        payload['error_code'] = error_code
+    if error_name is not None:
+        payload['error_name'] = error_name
+    if frame_type is not None:
+        payload['frame_type'] = frame_type
+    if details:
+        payload.update(details)
+
+    return AllGNFastCommands.transport.ConnectionError(payload)
+
+
+
 
 
 async def chain_async(first_item, rest: AsyncIterable) -> AsyncGenerator:
@@ -519,7 +549,7 @@ class RawQuicClient(QuicProtocolShell):
         while self._running:
             await asyncio.sleep(self.quicClient._client._configuration.get('L5', {}).get('disconnection', {}).get('ping_check_interval', 5))
             idle_time = time.time() - self._last_activity
-            if idle_time > self.quicClient._client._configuration.get('L5', {}).get('disconnection', {}).get('ping_interval', 15):
+            if idle_time >= self.quicClient._client._configuration.get('L5', {}).get('disconnection', {}).get('ping_interval', 15):
                 self._quic.send_ping(next(self._ping_id_gen))
                 self.transmit()
                 self._last_activity = time.time()
@@ -703,6 +733,26 @@ class RawQuicClient(QuicProtocolShell):
                 f'reason={event.reason_phrase!r}'
             )
 
+            transport_error_details = {
+                'event': 'ConnectionTerminated',
+            }
+            transport_error = _build_transport_connection_error(
+                domain=client_ref.domain,
+                source='quic_connection_terminated',
+                reason=event.reason_phrase or None,
+                error_code=event.error_code,
+                error_name=error_name,
+                frame_type=event.frame_type,
+                details=transport_error_details,
+            )
+
+            for handler in self._inflight.values():
+                if isinstance(handler, asyncio.Queue):
+                    handler.put_nowait(None)
+                else:
+                    if not handler.done():
+                        handler.set_exception(transport_error)
+
             for state in self._inflight_streams.values():
                 message = cast(Union[GNRequest, GNResponse], state['message'])
                 message._finishIncomingPayload(False)
@@ -792,8 +842,18 @@ class RawQuicClient(QuicProtocolShell):
             self._timed_out_streams.add(sid)
             if len(self._timed_out_streams) > 8192:
                 self._timed_out_streams.clear()
+            exc = sys.exc_info()[1]
+            if isinstance(exc, GNResponse):
+                return exc
             logger.error(traceback.format_exc())
-            return AllGNFastCommands.transport.ConnectionError()
+            return _build_transport_connection_error(
+                domain=self._QuicClient.domain,
+                source='request_wait_failed',
+                details={
+                    'exception_type': type(exc).__name__ if exc is not None else 'UnknownError',
+                    'exception': str(exc) if exc is not None and str(exc) else None,
+                },
+            )
         
         if data is None:
             return AllGNFastCommands.transport.ConnectionError()
@@ -878,7 +938,12 @@ class QuicClient:
             self._client._kdc.setDomainEcryptionType(self.domain, encType)
 
         if encType == 1 and self._client.server is not None:
-            if not await self._client.server.DEPConfig.isKDCAllowedForDomain(self.domain):
+            confirmed_domain_allowed = False
+            confirmed_keyid = self._client._kdc.getKeyIdByDomain(self.domain)
+            if confirmed_keyid is not None and self._client._kdc.getKey(confirmed_keyid) is not None:
+                confirmed_domain_allowed = await self._client.server.DEPConfig.isConfirmedKDCDomainAllowed(self.domain)
+
+            if not confirmed_domain_allowed and not await self._client.server.DEPConfig.isKDCAllowedForDomain(self.domain):
                 raise AllGNFastCommands.transport.PolicyDenied({
                     'policy': 'kdc_allowed_domains',
                     'domain': self.domain,
