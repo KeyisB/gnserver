@@ -458,7 +458,11 @@ class QuicProtocolShell(QuicConnectionProtocol):
 
                 client_settings = getattr(tls_ctx, '_gn_pq_client_settings', None) if tls_ctx else None
                 client_identity = getattr(client_settings, 'client_identity', None) if client_settings else None
-                verified_client_domain = client_identity.certificate.name if client_identity is not None else None
+                # Prefer the configured concrete domain over the certificate name (which may be a wildcard pattern)
+                verified_client_domain = (
+                    getattr(client_settings, 'client_domain', None)
+                    or (client_identity.certificate.name if client_identity is not None else None)
+                )
 
                 eff_local = verified_client_domain if verified_client_domain is not None else "pq:anonymous"
                 eff_peer = server_cert_domain

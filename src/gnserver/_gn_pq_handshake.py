@@ -41,10 +41,36 @@ from .oqs import (
 )
 
 from KeyisBTools import userFriendly
+from gnobjects.net.tools import DomainMatcher
 
 
 import logging
 logger = logging.getLogger("GNServer.DatagramEndpoint.PQ")
+
+_domain_matcher = DomainMatcher()
+
+
+def _gn_cert_name_covers_domain(cert_name: str, domain: str) -> bool:
+    """Return True if *domain* is covered by the GN PQ certificate name.
+
+    cert_name may be:
+    - A literal domain string ("24~gwis", "axioma.com")
+    - A GN wildcard pattern ("*~gwis", "**.axioma.com", "@axioma.api.**")
+    - A comma-separated list of any of the above (multi-domain certificate)
+
+    Matching direction: cert_name is the pattern, domain is the concrete value.
+    """
+    for pattern in (p.strip() for p in cert_name.split(",")):
+        if not pattern:
+            continue
+        if pattern == domain:
+            return True
+        # Wildcard matching only applies when the runtime domain is a concrete value (no '*').
+        # A domain containing '*' is itself a pattern; only exact equality is allowed for those.
+        if "*" in pattern and "*" not in domain and _domain_matcher.match(pattern, domain):
+            return True
+    return False
+
 
 def _gn_pq_handshake_log(message: str) -> None:
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
@@ -220,8 +246,8 @@ def _verify_pq_certificate(
     now_timestamp: Optional[datetime.datetime] = None,
     peer_role: str,
 ) -> None:
-    if certificate.name != expected_domain:
-        raise ValueError(f"{peer_role.capitalize()} certificate name mismatch")
+    if not _gn_cert_name_covers_domain(certificate.name, expected_domain):
+        raise ValueError(f"{peer_role.capitalize()} certificate name mismatch: {expected_domain!r} is not covered by certificate name {certificate.name!r}")
 
     if now_timestamp is None:
         now_timestamp = datetime.datetime.now(datetime.timezone.utc)
@@ -388,8 +414,8 @@ def build_server_handshake(
     server_identity: GNPQCertifiedServerIdentity,
     client_hello: GNPQClientHello,
 ) -> GNPQServerHandshakeState:
-    if server_identity.certificate.name != local_server_domain:
-        raise ValueError("Server certificate name does not match local server domain")
+    if not _gn_cert_name_covers_domain(server_identity.certificate.name, local_server_domain):
+        raise ValueError(f"Server certificate name {server_identity.certificate.name!r} does not cover local server domain {local_server_domain!r}")
 
     signature_algorithm = get_default_gn_pq_signature_algorithm_name()
     oqs_signature_algorithm = get_oqs_gn_pq_signature_algorithm_name(signature_algorithm)

@@ -30,6 +30,7 @@ from ._gn_pq_handshake import (
     GNPQClientCompletion,
     GNPQClientHandshakeState,
     GNPQEstablishedState,
+    _gn_cert_name_covers_domain,
     _sha3_256_hex,
     build_client_handshake,
     build_client_signature_message,
@@ -314,8 +315,8 @@ def _extract_gn_pq_identity(gn_server_crt: dict) -> GNPQCertifiedServerIdentity:
         raise ValueError("gn_server_crt.crypto.crt must be a dict")
 
     certificate = _parse_server_certificate(crt_container)
-    if certificate.name != domain:
-        raise ValueError("gn_server_crt.domain must match gn_server_crt.crypto.crt.data.domain")
+    if not _gn_cert_name_covers_domain(certificate.name, domain):
+        raise ValueError(f"gn_server_crt.domain {domain!r} is not covered by gn_server_crt.crypto.crt.data.domain {certificate.name!r}")
 
     return GNPQCertifiedServerIdentity(
         certificate=certificate,
@@ -340,9 +341,9 @@ def build_gn_pq_client_settings(
         cert_domain = client_identity.certificate.name
         if client_domain is None:
             client_domain = cert_domain
-        elif client_domain != cert_domain:
+        elif not _gn_cert_name_covers_domain(cert_domain, client_domain):
             raise ValueError(
-                f"Configured client domain {client_domain!r} does not match GN PQ certificate domain {cert_domain!r}"
+                f"Configured client domain {client_domain!r} is not covered by GN PQ certificate name {cert_domain!r}"
             )
     else:
         if client_domain is not None:
@@ -1051,7 +1052,7 @@ def _gn_pq_server_handle_certificate(self: tls.Context, input_buf: Buffer, outpu
             )
 
             claimed_domain = getattr(self, "_gn_pq_client_claimed_domain", None)
-            if claimed_domain is not None and claimed_domain != client_certificate.name:
+            if claimed_domain is not None and not _gn_cert_name_covers_domain(client_certificate.name, claimed_domain):
                 raise ValueError("GN PQ client certificate name mismatch")
 
             client_ca_public_key = get_gn_pq_ca_public_key(
@@ -1083,9 +1084,10 @@ def _gn_pq_server_handle_certificate(self: tls.Context, input_buf: Buffer, outpu
                 if not sig.verify(client_signature_message, client_signature, client_public_key):
                     raise ValueError("Invalid client ML-DSA signature in certificate flight")
 
-            self._gn_pq_authenticated_client_domain = client_certificate.name
+            self._gn_pq_authenticated_client_domain = claimed_domain if claimed_domain is not None else client_certificate.name
             _gn_pq_log(
-                f"server verified GN PQ client certificate domain={client_certificate.name!r} "
+                f"server verified GN PQ client certificate domain={self._gn_pq_authenticated_client_domain!r} "
+                f"cert_name={client_certificate.name!r} "
                 f"sig_algo={client_signature_algorithm!r}"
             )
 
