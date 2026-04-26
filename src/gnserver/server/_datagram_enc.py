@@ -407,7 +407,8 @@ class QuicProtocolShell(QuicConnectionProtocol):
             )
             raise
 
-      
+    def on_prequic_error(self, error_code: int, expected_enc_type: int) -> None:
+        pass
 
     def _apply_gn_pq_session_root(self, peer_domain: Optional[str]) -> bool:
         if not peer_domain:
@@ -613,6 +614,15 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
         return
         logger.debug(f"datagrams: got={self.__info_dg_count}")
 
+    def _send_prequic_error(self, addr, error_code: int, expected_enc_type: int = 0) -> None:
+        maddr = self.from_addr_to_maddr(addr)
+        packet = bytes([
+            ((self._gn_protocol_version & 0x7F) << 1) | 0x01,
+            ((1 & 0x0F) << 4) | (error_code & 0x0F),
+            expected_enc_type & 0xFF,
+        ])
+        self.transport.sendMapped(packet, addr, _maddr=maddr)
+
     async def _is_kdc_bootstrap_allowed_for_local_domain(self) -> bool:
         if self._domain is None:
             return True
@@ -781,6 +791,15 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
         confirmed_domain = self._get_confirmed_kdc_domain(keyid)
         established_enc_type = await self._get_established_enc_type_for_domain(confirmed_domain)
         confirmed_domain_allowed = established_enc_type is not None
+
+        if confirmed_domain is not None and established_enc_type is not None and established_enc_type != encryption_type:
+            connectionEnc.ready = None
+            self._send_prequic_error(addr, error_code=1, expected_enc_type=established_enc_type)
+            _prequic_log(
+                f"_init_encrypted_initial_connection enc-type mismatch keyid={keyid} "
+                f"domain={confirmed_domain!r} incoming={encryption_type} expected={established_enc_type}"
+            )
+            return None
 
         if not confirmed_domain_allowed and not await self._is_kdc_bootstrap_allowed_for_local_domain():
             connectionEnc.ready = None
@@ -1251,10 +1270,20 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
         d = None
 
         if data[0] & 0x01: # если системный пакет.
-            if len(data) < 10:
+            if len(data) < 2:
                 _prequic_log(f"handle system packet dropped: too short addr={maddr} len={len(data)}")
                 return
             commnd_id = (data[1] >> 4) & 0x0F
+            if commnd_id == 1: # pre-QUIC error response
+                if not isinstance(self._quic_routing, QuicServer) and len(data) >= 3:
+                    self._quic_routing.on_prequic_error(
+                        error_code=data[1] & 0x0F,
+                        expected_enc_type=data[2],
+                    )
+                return
+            if len(data) < 10:
+                _prequic_log(f"handle system packet dropped: too short addr={maddr} len={len(data)}")
+                return
             datagram = data[10:]
             if commnd_id == 0: # initial
                 if len(addr) == 2:

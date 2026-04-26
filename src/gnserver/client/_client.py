@@ -554,6 +554,16 @@ class RawQuicClient(QuicProtocolShell):
                 self.transmit()
                 self._last_activity = time.time()
 
+    def on_prequic_error(self, error_code: int, expected_enc_type: int) -> None:
+        if error_code == 1:  # DifferentEncryptionType
+            fut = self._QuicClient.connect_future
+            if not fut.done():
+                fut.set_exception(
+                    AllGNFastCommands.cors.DifferentEncryptionType({
+                        'data': {'expected_encryption_type': expected_enc_type}
+                    })
+                )
+
     def stop(self):
         self._running = False
 
