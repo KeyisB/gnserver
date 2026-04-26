@@ -133,24 +133,24 @@ def _host_matches_pattern(host: str, pattern: str) -> bool:
 
 
 
-def resolve_cors(request: GNRequest, cors: Optional[CORSObject]):
+def resolve_cors(request: GNRequest, cors: CORSObject | None) -> None:
     if cors is None:
         return
     
     if request.client.type not in cors.allow_client_types and request.client.type_int != 0:
-        raise AllGNFastCommands.cors.ClientTypeNotAllowed()
+        raise AllGNFastCommands.cors.ClientTypeNotAllowed({'message': f'Client type {request.client.type} not allowed for CORS. Allowed {cors.allow_client_types}'})
     
     if cors.allow_origins is not None:
         if request._origin is None:
-            raise AllGNFastCommands.cors.OriginNotAllowed('Route has cors but request has no origin url')
+            raise AllGNFastCommands.cors.OriginNotAllowed({'message': 'Route has cors but request has no origin url'})
 
         if not _resolve_cors(request._origin, cors.allow_origins):
-            raise AllGNFastCommands.cors.OriginNotAllowed()
+            raise AllGNFastCommands.cors.OriginNotAllowed({'message': 'Origin not allowed for CORS'})
 
     if cors.allow_methods is not None:
         if request.method not in cors.allow_methods:
-            raise AllGNFastCommands.cors.MethodNotAllowed()
-        
+            raise AllGNFastCommands.cors.MethodNotAllowed({'message': f'Method {request.method} not allowed for CORS. Allowed {cors.allow_methods}'})
+
     if cors.allow_transport_protocols is not None:
         if request.transport in ('gn:quik:real', 'gn:quik:dev') and request.transport not in cors.allow_transport_protocols:
-            raise AllGNFastCommands.cors.TransportProtocolNotAllowed()
+            raise AllGNFastCommands.cors.TransportProtocolNotAllowed({'message': 'Transport protocol not allowed for CORS'})

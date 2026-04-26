@@ -1,5 +1,5 @@
 
-
+from __future__ import annotations
 import os
 import sys
 import asyncio
@@ -361,8 +361,8 @@ class App:
 
     async def dispatchRequest(
         self, request: GNRequest,
-        proto: Optional["_ServerProto"] = None
-    ) -> Union[GNResponse, AsyncGenerator[GNResponse, None]]:
+        proto: App._ServerProto | None = None
+    ) -> GNResponse | None:
         path = request.url.path
         method = request.method
         path_candidates = self._build_path_candidates(path)
@@ -450,6 +450,9 @@ class App:
                 if c is not None:
                     resolve_cors(request, c)
 
+                if result.command.NoResponse:
+                    return None
+
                 return result
             else:
                 raise TypeError(
@@ -457,8 +460,8 @@ class App:
                 )
 
         if allowed:
-            raise AllGNFastCommands.MethodNotAllowed()
-        raise AllGNFastCommands.NotFound({'code': 3, 'message': f'Path not found: {path}: request: {request}'})
+            raise AllGNFastCommands.app.MethodNotAllowed({'message': f'Method {method} not allowed for path: {path}'})
+        raise AllGNFastCommands.app.PathNotFound({'message': f'Path not found: {path}: request: {request}'})
 
 
   
@@ -710,19 +713,20 @@ class App:
 
         async def _resolve_dev_transport_response(self, response: GNResponse, request: GNRequest):
             
-            if request.cookies is None:
-                return
-            
-            gn_ = request.cookies.get('gn')
-            if gn_ is not None:
-                if response._cookies is None:
-                    response._cookies = {}
-                response._cookies['gn'] = gn_
-
             if not request.transportObject.routeProtocol.dev:
                 return
 
-            data: Optional[dict] = response.cookies.get('gn', {}).get('request', {}).get('transport', {}).get('::dev')
+            if request.cookies is None:
+                return
+            
+            # gn_ = request.cookies.get('gn')
+            # if gn_ is not None:
+            #     if response._cookies is None:
+            #         response._cookies = {}
+            #     response._cookies['gn'] = gn_
+
+
+            data: dict | None = response.cookies.get('gn', {}).get('request', {}).get('transport', {}).get('::dev')
             if data is None:
                 return
             
@@ -740,23 +744,16 @@ class App:
 
 
         async def _handle_request(self, request: GNRequest):
-
             try:
                 response = await self._api.dispatchRequest(request, self)
 
-                if inspect.isasyncgen(response):
-                    async for chunk in response:  # type: ignore
-                        chunk._stream = True
-                        await self.sendResponseFromRequest(request, chunk, False)
-                        
-                    resp = GNResponse('gn:end-stream')
-                    resp._stream = True # type: ignore
-
-                    await self.sendResponseFromRequest(request, resp)
+                if response is None:
                     return
 
                 if not isinstance(response, GNResponse):
-                    await self.sendResponseFromRequest(request, AllGNFastCommands.InternalServerError('Invalid response'))
+                    await self.sendResponseFromRequest(request, AllGNFastCommands.InternalServerError(
+                        {'message': f'Invalid response type: {type(response)}'}
+                    ))
                     return
 
                 await self.sendResponseFromRequest(request, response)
@@ -765,7 +762,6 @@ class App:
                     await self.sendResponseFromRequest(request, e)
                 else:
                     logger.error('InternalServerError:\n'  + traceback.format_exc())
-
                     await self.sendResponseFromRequest(request, AllGNFastCommands.InternalServerError())
             
 
