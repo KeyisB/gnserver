@@ -938,12 +938,12 @@ class QuicClient:
             self._client._kdc.setDomainEcryptionType(self.domain, encType)
 
         if encType == 1 and self._client.server is not None:
-            confirmed_domain_allowed = False
+            established_enc_type = None
             confirmed_keyid = self._client._kdc.getKeyIdByDomain(self.domain)
             if confirmed_keyid is not None and self._client._kdc.getKey(confirmed_keyid) is not None:
-                confirmed_domain_allowed = await self._client.server.DEPConfig.isConfirmedKDCDomainAllowed(self.domain)
+                established_enc_type = await self._client.server.DEPConfig.getEstablishedEncryptionTypeForDomain(self.domain)
 
-            if not confirmed_domain_allowed and not await self._client.server.DEPConfig.isKDCAllowedForDomain(self.domain):
+            if established_enc_type is None and not await self._client.server.DEPConfig.isKDCAllowedForDomain(self.domain):
                 raise AllGNFastCommands.transport.PolicyDenied({
                     'policy': 'kdc_allowed_domains',
                     'domain': self.domain,

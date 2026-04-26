@@ -618,10 +618,10 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
             return True
         return await self.DEPConfig.isKDCAllowedForDomain(self._domain)
 
-    async def _is_confirmed_kdc_domain_allowed(self, domain: Optional[str]) -> bool:
+    async def _get_established_enc_type_for_domain(self, domain: str | None) -> int | None:
         if domain is None:
-            return False
-        return await self.DEPConfig.isConfirmedKDCDomainAllowed(domain)
+            return None
+        return await self.DEPConfig.getEstablishedEncryptionTypeForDomain(domain)
 
     def _get_confirmed_kdc_domain(self, keyid: Tuple[int, int]) -> Optional[str]:
         if self._kdc.getKey(keyid) is None:
@@ -779,7 +779,8 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
         addr,
     ) -> Optional[str]:
         confirmed_domain = self._get_confirmed_kdc_domain(keyid)
-        confirmed_domain_allowed = await self._is_confirmed_kdc_domain_allowed(confirmed_domain)
+        established_enc_type = await self._get_established_enc_type_for_domain(confirmed_domain)
+        confirmed_domain_allowed = established_enc_type is not None
 
         if not confirmed_domain_allowed and not await self._is_kdc_bootstrap_allowed_for_local_domain():
             connectionEnc.ready = None
