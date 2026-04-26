@@ -4,7 +4,7 @@ import datetime
 import functools
 import threading
 from inspect import Parameter, _empty
-from typing import Any, Union, get_origin, get_args
+from typing import Any, Union, get_origin, get_args, get_type_hints
 _NoneType = type(None)
 _KEYTYPES = (str, bytes, int)
 
@@ -207,7 +207,16 @@ def register_schema_by_key(func) -> Schema:
     with _SCHEMA_LOCK:
         sc = _SCHEMA_CACHE.get(func)
         if sc is not None: return sc
-        sc = _build_schema_from_params(inspect.signature(func).parameters)
+        try:
+            hints = get_type_hints(func)
+        except Exception:
+            hints = {}
+        params = inspect.signature(func).parameters
+        resolved = {
+            n: p.replace(annotation=hints[n]) if n in hints else p
+            for n, p in params.items()
+        }
+        sc = _build_schema_from_params(resolved)
         _SCHEMA_CACHE[func] = sc
         return sc
 
