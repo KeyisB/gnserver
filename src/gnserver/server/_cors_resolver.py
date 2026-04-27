@@ -140,6 +140,9 @@ def resolve_cors(request: GNRequest, cors: CORSObject | None) -> None:
     if request.client.type not in cors.allow_client_types and request.client.type_int != 0:
         raise AllGNFastCommands.cors.ClientTypeNotAllowed({'message': f'Client type {request.client.type} not allowed for CORS. Allowed {cors.allow_client_types}'})
     
+    if request.object.type not in cors.allow_object_types and request.client.type_int != 0:
+        raise AllGNFastCommands.cors.ObjectTypeNotAllowed({'message': f'Object type {request.object.type} not allowed for CORS. Allowed {cors.allow_object_types}'})
+
     if cors.allow_origins is not None:
         if request._origin is None:
             raise AllGNFastCommands.cors.OriginNotAllowed({'message': 'Route has cors but request has no origin url'})
