@@ -23,7 +23,7 @@ from typing import Optional, Callable, Tuple
 from aioquic.asyncio.protocol import QuicConnectionProtocol
 from aioquic.quic.connection import QuicConnection
 
-from gnobjects.net.objects import Url
+from gnobjects.net.objects import Url, GNResponse
 from gnobjects.net.fastcommands import AllGNFastCommands
 from gnobjects.net.tools import DomainMatcherList
 from gnobjects.net.domains import GNDomain
@@ -408,6 +408,10 @@ class QuicProtocolShell(QuicConnectionProtocol):
             raise
 
     def on_prequic_error(self, error_code: int, expected_enc_type: int) -> None:
+        logger.error(
+            f"Pre-QUIC error: code={error_code} expected_enc_type={expected_enc_type} "
+            f"state={self._debug_runtime_state()}"
+        )
         pass
 
     def _apply_gn_pq_session_root(self, peer_domain: Optional[str]) -> bool:
@@ -1243,7 +1247,93 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
         finally:
             if connectionEnc.initial_send_task is current_task:
                 connectionEnc.initial_send_task = None
+
+    async def __handle_datagram_sys(self, data: bytes, maddr: tuple[str, int, int], connectionEnc: 'ConnectionEncryptor', addr):
+        if len(data) < 2:
+            _prequic_log(f"handle system packet dropped: too short addr={maddr} len={len(data)}")
+            return
+
+        commnd_id = (data[1] >> 4) & 0x0F
+        if commnd_id == 1: # pre-QUIC error response
+            if not isinstance(self._quic_routing, QuicServer) and len(data) >= 3:
+                self._quic_routing.on_prequic_error(
+                    error_code=data[1] & 0x0F,
+                    expected_enc_type=data[2],
+                )
+            return
+
+        if len(data) < 10:
+            _prequic_log(f"handle system packet dropped: too short addr={maddr} len={len(data)}")
+            return
+
+        datagram = data[10:]
+        if commnd_id == 0: # initial
+            if len(addr) == 2:
+                self.transport.addV4maddr(maddr)
+
+            encryption_type = data[1] & 0x0F
+            incoming_keyid: Optional[Tuple[int, int]] = None
+            if encryption_type != 0:
+                keyType = data[2]
+                key_id = int.from_bytes(data[3:10], 'big')
+                incoming_keyid = (keyType, key_id)
+
+            _prequic_log(
+                f"handle initial addr={maddr} incoming_enc={encryption_type} incoming_keyid={incoming_keyid} "
+                f"local_domain={self._domain!r} state_before={connectionEnc.debug_state()}"
+            )
+
+            if not connectionEnc.ready:
+                if encryption_type == 2: # PQ only (no KDC)
+                    d = await self._init_pq_initial_connection(connectionEnc, maddr)
+                elif encryption_type != 0: # KDC encrypted
+                    d = await self._init_encrypted_initial_connection(connectionEnc, encryption_type, cast(tuple[int, int], incoming_keyid), data, addr)
+                    if d is None: return
+                else:
+                    d = await self._init_unencrypted_initial_connection(connectionEnc, maddr)
+
+                while not connectionEnc.not_ready_queue.empty():
+                    raw, a = connectionEnc.not_ready_queue.get_nowait()
+                    await self._handle_datagram(raw, a)
+            else:
+                # Existing UDP association can still open new QUIC connections with new destination CID.
+                # Reuse the established transport state for repeated QUIC connections.
+                # Only refresh when the transport association itself changes.
+
+                if encryption_type == 2: # PQ only (no KDC)
+                    # Server: reinitialize bootstrap keys (a new client
+                    # connection after PQ rekey needs fresh bootstrap keys).
+                    # Client: keep existing keys — the server's initial
+                    # response must be decrypted with the SAME key pair.
+                    if connectionEnc.encryption_type != 2 or isinstance(self._quic_routing, QuicServer):
+                        d = await self._init_pq_initial_connection(connectionEnc, maddr)
+                    else:
+                        d = connectionEnc.domain
+                elif encryption_type != 0:
+                    if connectionEnc.keyid != incoming_keyid or connectionEnc.encryption_type != encryption_type:
+                        d = await self._init_encrypted_initial_connection(connectionEnc, encryption_type, cast(tuple[int, int], incoming_keyid), data, addr)
+                        if d is None: return
+                    else:
+                        d = self._kdc.getDomainById(cast(Any, incoming_keyid))
+                        if d is None:
+                            d = connectionEnc.domain
+                else:
+                    if connectionEnc.encryption_type != 0:
+                        d = await self._init_unencrypted_initial_connection(connectionEnc, maddr)
+                    else:
+                        d = Url.ip_and_port_to_ipv6_with_port(maddr[0], maddr[1])
+
+                if d is not None:
+                    connectionEnc.domain = d
+            _prequic_log(
+                f"handle initial done addr={maddr} resolved_domain={d!r} state_after={connectionEnc.debug_state()}"
+            )
+        else:
+            _prequic_log(
+                f"handle system packet addr={maddr} command_id={commnd_id} wrapped_len={len(data)} state={connectionEnc.debug_state()}"
+            )
         
+        return datagram
 
     async def _handle_datagram(self, data: bytes, addr):
         if not data:
@@ -1263,102 +1353,27 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
         maddr = self.from_addr_to_maddr(addr)
 
 
-        connectionEnc  = self.getDgEnc(maddr)
+        connectionEnc = self.getDgEnc(maddr)
         if connectionEnc.ready is None:
             logger.warning(f'UDP: datagramm blocked ({maddr})')
 
         d = None
 
         if data[0] & 0x01: # если системный пакет.
-            if len(data) < 2:
-                _prequic_log(f"handle system packet dropped: too short addr={maddr} len={len(data)}")
+            try:
+                datagram = await self.__handle_datagram_sys(data, maddr, connectionEnc, addr)
+            except Exception as e:
+                if isinstance(e, GNResponse):
+                    logger.warning(f"Exception in system datagram handling: {await e.__reprfull__()}")
+                    return
+
+                logger.error(f"Error occurred while handling system datagram: {e}")
                 return
-            commnd_id = (data[1] >> 4) & 0x0F
-            if commnd_id == 1: # pre-QUIC error response
-                if not isinstance(self._quic_routing, QuicServer) and len(data) >= 3:
-                    self._quic_routing.on_prequic_error(
-                        error_code=data[1] & 0x0F,
-                        expected_enc_type=data[2],
-                    )
-                return
-            if len(data) < 10:
-                _prequic_log(f"handle system packet dropped: too short addr={maddr} len={len(data)}")
-                return
-            datagram = data[10:]
-            if commnd_id == 0: # initial
-                if len(addr) == 2:
-                    self.transport.addV4maddr(maddr)
 
-                encryption_type = data[1] & 0x0F
-                incoming_keyid: Optional[Tuple[int, int]] = None
-                if encryption_type != 0:
-                    keyType = data[2]
-                    key_id = int.from_bytes(data[3:10], 'big')
-                    incoming_keyid = (keyType, key_id)
+            if datagram is None: return
 
-                _prequic_log(
-                    f"handle initial addr={maddr} incoming_enc={encryption_type} incoming_keyid={incoming_keyid} "
-                    f"local_domain={self._domain!r} state_before={connectionEnc.debug_state()}"
-                )
-
-                if not connectionEnc.ready:
-                    if encryption_type == 2: # PQ only (no KDC)
-                        d = await self._init_pq_initial_connection(connectionEnc, maddr)
-                    elif encryption_type != 0: # KDC encrypted
-                        d = await self._init_encrypted_initial_connection(connectionEnc, encryption_type, cast(Tuple[int, int], incoming_keyid), data, addr)
-                        if d is None:
-                            return
-                    else:
-                        d = await self._init_unencrypted_initial_connection(connectionEnc, maddr)
-
-                    while not connectionEnc.not_ready_queue.empty():
-                        raw, a = connectionEnc.not_ready_queue.get_nowait()
-                        await self._handle_datagram(raw, a)
-                else:
-                    # Existing UDP association can still open new QUIC connections with new destination CID.
-                    # Reuse the established transport state for repeated QUIC connections.
-                    # Only refresh when the transport association itself changes.
-
-                    if encryption_type == 2: # PQ only (no KDC)
-                        # Server: reinitialize bootstrap keys (a new client
-                        # connection after PQ rekey needs fresh bootstrap keys).
-                        # Client: keep existing keys — the server's initial
-                        # response must be decrypted with the SAME key pair.
-                        if connectionEnc.encryption_type != 2 or isinstance(self._quic_routing, QuicServer):
-                            d = await self._init_pq_initial_connection(connectionEnc, maddr)
-                        else:
-                            d = connectionEnc.domain
-                    elif encryption_type != 0:
-                        if connectionEnc.keyid != incoming_keyid or connectionEnc.encryption_type != encryption_type:
-                            d = await self._init_encrypted_initial_connection(connectionEnc, encryption_type, cast(Tuple[int, int], incoming_keyid), data, addr)
-                            if d is None:
-                                return
-                        else:
-                            d = self._kdc.getDomainById(cast(Any, incoming_keyid))
-                            if d is None:
-                                d = connectionEnc.domain
-                    else:
-                        if connectionEnc.encryption_type != 0:
-                            d = await self._init_unencrypted_initial_connection(connectionEnc, maddr)
-                        else:
-                            d = Url.ip_and_port_to_ipv6_with_port(maddr[0], maddr[1])
-
-                    if d is not None:
-                        connectionEnc.domain = d
-                _prequic_log(
-                    f"handle initial done addr={maddr} resolved_domain={d!r} state_after={connectionEnc.debug_state()}"
-                )
-            else:
-                _prequic_log(
-                    f"handle system packet addr={maddr} command_id={commnd_id} wrapped_len={len(data)} state={connectionEnc.debug_state()}"
-                )
         else:
             datagram = data[1:]
-
-            # _prequic_log(
-            #     f"handle payload packet addr={maddr} wrapped_len={len(data)} state_before={connectionEnc.debug_state()}"
-            # )
-
             if not connectionEnc.ready:
                 _prequic_log(f"handle payload queued addr={maddr} reason=not-ready state={connectionEnc.debug_state()}")
                 connectionEnc.not_ready_queue.put_nowait((data, addr))
@@ -1369,9 +1384,6 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
                 dec = connectionEnc.decrypt(datagram)
                 
             except Exception as e:
-                key_in_fp = hashlib.sha3_256(connectionEnc._key_in).hexdigest()[:16] if hasattr(connectionEnc, '_key_in') else 'none'
-                prev_fp = hashlib.sha3_256(connectionEnc._prev_key_in).hexdigest()[:16] if hasattr(connectionEnc, '_prev_key_in') and connectionEnc._prev_key_in else 'none'
-                root64_fp = hashlib.sha3_256(connectionEnc._session_root64).hexdigest()[:16] if connectionEnc._session_root64 else 'none'
                 # Check if the payload looks like a plaintext QUIC packet (bit 6 "fixed bit" set)
                 looks_plaintext = len(datagram) > 0 and (datagram[0] & 0x40) != 0
                 logger.error(
@@ -1379,8 +1391,7 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
                     f'info:\naddr: {addr}\n'
                     f'{connectionEnc.domain}'
                     f'{connectionEnc.keyid}'
-                    f'key_in_fp={key_in_fp} prev_key_in_fp={prev_fp} root64_fp={root64_fp}'
-                    f'{connectionEnc.eEndpoint._kdc.getKey(connectionEnc.keyid)}')
+                )
                 return
         else:
             dec = datagram
@@ -1396,6 +1407,5 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
                 f"routing datagram_received error addr={maddr} quic={self._describe_quic_datagram(dec)} "
                 f"routing_state={self._describe_routing_state()} trace={traceback.format_exc()}"
             )
-            raise
 
 

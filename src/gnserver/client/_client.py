@@ -16,7 +16,7 @@ import logging
 
 from KeyisBTools import TTLDict
 from gnobjects.net.objects import GNRequest, GNResponse, Url
-from gnobjects.net.fastcommands import AllGNFastCommands
+from gnobjects.net.fastcommands import AllGNFastCommands, GNFastCommand
 from gnobjects.net.domains import GNDomain
 from .._crt import crt_client, ml_kem_crt_client
 from .._gn_pq_quic import build_gn_pq_client_settings
@@ -330,7 +330,7 @@ class AsyncClient:
             try:
                 c = await self.connect(request, restart_connection, reconnect_wait, keep_alive=keep_alive)
             except BaseException as e:
-                if isinstance(e, GNResponse):
+                if isinstance(e, (GNResponse, GNFastCommand)):
                     return e
                 else:
                     return GNResponse(str(e), payload=traceback.format_exc())
@@ -364,7 +364,7 @@ class AsyncClient:
                     )
                     r = await c.asyncRequest(request, only_request=only_request)
                 except BaseException as e:
-                    if isinstance(e, GNResponse):
+                    if isinstance(e, (GNResponse, GNFastCommand)):
                         r = e
                     else:
                         r = GNResponse(str(e), payload=traceback.format_exc())
@@ -376,7 +376,7 @@ class AsyncClient:
 
             return r # type: ignore
         
-        else:
+        else: # TODO
 
             c: Optional[QuicClient] = None
 
