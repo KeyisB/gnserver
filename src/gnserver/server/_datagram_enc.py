@@ -1270,6 +1270,7 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
             return
 
         datagram = data[10:]
+        d: Optional[str] = None
         if commnd_id == 0: # initial
             if len(addr) == 2:
                 self.transport.addV4maddr(maddr)
@@ -1336,7 +1337,7 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
                 f"handle system packet addr={maddr} command_id={commnd_id} wrapped_len={len(data)} state={connectionEnc.debug_state()}"
             )
         
-        return datagram
+        return datagram, d
 
     async def _handle_datagram(self, data: bytes, addr):
         if not data:
@@ -1364,7 +1365,7 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
 
         if data[0] & 0x01: # если системный пакет.
             try:
-                datagram = await self.__handle_datagram_sys(data, maddr, connectionEnc, addr)
+                sys_result = await self.__handle_datagram_sys(data, maddr, connectionEnc, addr)
             except Exception as e:
                 if isinstance(e, (GNResponse, AllGNFastCommands)):
                     logger.warning(f"Exception in system datagram handling: {await e.__reprfull__()}")
@@ -1373,7 +1374,8 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
                 logger.error(f"Error occurred while handling system datagram: {e}")
                 return
 
-            if datagram is None: return
+            if sys_result is None: return
+            datagram, d = sys_result
 
         else:
             datagram = data[1:]
