@@ -889,9 +889,12 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
                     await self._finalize_key_and_flush(connectionEnc, encryption_type, keyid)
         except Exception as e:
             connectionEnc.ready = None
-            logger.warning(f'UDP key fetch error: {traceback.format_exc()}')
-        finally:
             connectionEnc.key_fetching = False
+            if isinstance(e, (GNResponse, AllGNFastCommands)):
+                logger.warning(f"Exception in key fetch: {await e.__reprfull__()}")
+                return
+            logger.warning(f'UDP key fetch error: {traceback.format_exc()}')
+            
 
     async def _finalize_key_and_flush(self, connectionEnc: ConnectionEncryptor, encryption_type: int, keyid: Tuple[int, int]):
         d = await connectionEnc.initByKeyid(encryption_type, keyid)
@@ -1363,7 +1366,7 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
             try:
                 datagram = await self.__handle_datagram_sys(data, maddr, connectionEnc, addr)
             except Exception as e:
-                if isinstance(e, GNResponse):
+                if isinstance(e, (GNResponse, AllGNFastCommands)):
                     logger.warning(f"Exception in system datagram handling: {await e.__reprfull__()}")
                     return
 
