@@ -340,34 +340,34 @@ class AsyncClient:
                 asyncio.create_task(f(request))
             r = await c.asyncRequest(request, only_request=only_request)
 
-            retry_connect_request = (
-                isinstance(r, GNResponse)
-                and not only_request
-                and request.url.path == '/gn/connect'
-                and (
-                    r.command.transport.ReceiveTimeout
-                    or r.command.transport.ConnectionError
-                    or r.command.transport.SocketClosed
-                )
-            )
+            # retry_connect_request = (
+            #     isinstance(r, GNResponse)
+            #     and not only_request
+            #     and request.url.path == '/gn/connect'
+            #     and (
+            #         r.command.transport.ReceiveTimeout
+            #         or r.command.transport.ConnectionError
+            #         or r.command.transport.SocketClosed
+            #     )
+            # )
 
-            if retry_connect_request:
-                logger.warning(
-                    f"Retrying {request.method} {request.url} after transport failure: {r.command}"
-                )
-                try:
-                    c = await self.connect(
-                        request,
-                        restart_connection=True,
-                        reconnect_wait=reconnect_wait,
-                        keep_alive=keep_alive,
-                    )
-                    r = await c.asyncRequest(request, only_request=only_request)
-                except BaseException as e:
-                    if isinstance(e, (GNResponse, GNFastCommand)):
-                        r = e
-                    else:
-                        r = GNResponse(str(e), payload=traceback.format_exc())
+            # if retry_connect_request:
+            #     logger.warning(
+            #         f"Retrying {request.method} {request.url} after transport failure: {r.command}"
+            #     )
+            #     try:
+            #         c = await self.connect(
+            #             request,
+            #             restart_connection=True,
+            #             reconnect_wait=reconnect_wait,
+            #             keep_alive=keep_alive,
+            #         )
+            #         r = await c.asyncRequest(request, only_request=only_request)
+            #     except BaseException as e:
+            #         if isinstance(e, (GNResponse, GNFastCommand)):
+            #             r = e
+            #         else:
+            #             r = GNResponse(str(e), payload=traceback.format_exc())
 
             logger.info(f'[<] Response: {request.method} {request.url} -> {r.command}')
 

@@ -207,11 +207,12 @@ class ConnectionEncryptor:
         self.encryption_type = encryption_type
         self.keyid = keyid
         self._session_root64 = None
+        print('requestKeyIfNotExist: initByKeyid', encryption_type, keyid)
         await self.eEndpoint._kdc.requestKeyIfNotExist(keyid)
 
         key = self.eEndpoint._kdc.getKey(keyid)
         
-        DestDomain = self.eEndpoint._kdc.getDomainById(cast(Any, keyid))
+        DestDomain = self.eEndpoint._kdc.getDomainById(keyid)
 
         if DestDomain is None:
             raise AllGNFastCommands.transport.KeyDomainNotFound({'keyid': keyid})
@@ -792,6 +793,7 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
         data: bytes,
         addr,
     ) -> Optional[str]:
+        print(f"_init_encrypted_initial_connection start keyid={keyid} addr={addr} state={connectionEnc.debug_state()}, encryption_type={encryption_type}, data_len={len(data)}")
         confirmed_domain = self._get_confirmed_kdc_domain(keyid)
         established_enc_type = await self._get_established_enc_type_for_domain(confirmed_domain)
         confirmed_domain_allowed = established_enc_type is not None
@@ -879,6 +881,7 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
 
     async def _fetch_key_and_resume(self, connectionEnc: ConnectionEncryptor, encryption_type: int, keyid: Tuple[int, int]):
         try:
+            print(f"requestKeyIfNotExist: _fetch_key_and_resume: fetching keyid={keyid} for connection {connectionEnc.debug_state()}")
             await self._kdc.requestKeyIfNotExist(keyid)
 
             if self._inbound_global_lock_enabled:
@@ -1118,28 +1121,25 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
         else: # len == 4
             return (addr[0], addr[1], addr[3])
 
-    def construct_initial(self, encryption_type: int, keyId: int) -> bytes:
+    def construct_initial(self, encryption_type: int, keyId: tuple[int, int]) -> bytes:
         data = bytearray()
 
         b0 = ((self._gn_protocol_version & 0x7F) << 1) | (True & 0x01)
         data.append(b0)
 
-        if isinstance(keyId, tuple):
-            keyType = keyId[0]
-            keyId = keyId[1]
-        else:
-            keyType = 0
+        keyType = keyId[0]
+        _keyId = keyId[1]
             
 
-        if keyId < 0:
-            keyId = abs(keyId)
+        if _keyId < 0:
+            _keyId = abs(_keyId)
 
 
         b1 = ((0 & 0x0F) << 4) | (encryption_type & 0x0F) # command 4b | encryption_type 4b
         data.append(b1)
 
         data.extend(int(keyType).to_bytes(1, 'big')) # keyType # 1B # 0 - 255
-        data.extend(keyId.to_bytes(7, 'big')) # keyId # 7B
+        data.extend(_keyId.to_bytes(7, 'big')) # keyId # 7B
 
         return bytes(data)
 
@@ -1194,10 +1194,10 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
 
         self.transport.sendMapped(self._payload_b0 + enc, addr, _maddr=maddr)
 
-    def _send_initial_datagram(self, connectionEnc: 'ConnectionEncryptor', data: bytes, addr, keyid) -> None:
+    def _send_initial_datagram(self, connectionEnc: 'ConnectionEncryptor', data: bytes, addr, keyid: tuple[int, int]) -> None:
         maddr = self.from_addr_to_maddr(addr)
         effective_encryption_type = connectionEnc.encryption_type
-        p = self.construct_initial(effective_encryption_type, keyid) # type: ignore
+        p = self.construct_initial(effective_encryption_type, keyid)
         _prequic_log(
             f"async_sendto prepared initial addr={maddr} effective_enc={effective_encryption_type} keyid={keyid} "
             f"quic={self._describe_quic_datagram(data)} state={connectionEnc.debug_state()}"
