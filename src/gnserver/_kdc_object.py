@@ -1,7 +1,7 @@
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Awaitable, List, Optional, Dict, Union, Set, TYPE_CHECKING, Callable, Coroutine
-from gnobjects.net.objects import Url, GNRequest
+from gnobjects.net.objects import Url, GNRequest, GNResponse
 from gnobjects.net.fastcommands import AllGNFastCommands
 import inspect
 from typing import List, Optional, Dict, Union, Set, Deque, Tuple, cast
@@ -26,6 +26,24 @@ class InactiveTransportSession:
     root64: bytes
 
 class KDCObject:
+    @staticmethod
+    def isKDCKeyTypeSupported(key_type: int) -> bool:
+        return key_type in (0, 251, 255) or 1 <= key_type <= 100
+
+    @classmethod
+    def isKDCKeyIdSupported(cls, keyid: Tuple[int, int]) -> bool:
+        return cls.isKDCKeyTypeSupported(keyid[0])
+
+    @staticmethod
+    def _unsupported_key_type_payload(keyid: Tuple[int, int], **details) -> dict:
+        payload = {
+            'keyid': keyid,
+            'key_type': keyid[0],
+            'supported_key_types': ['0', '1-100', '251', '255'],
+        }
+        payload.update(details)
+        return payload
+
     def __init__(self, client: 'AsyncClient'):
      
         self._client = client
@@ -164,44 +182,134 @@ class KDCObject:
 
         out = []
 
-        if self._active_key_synchronization_df is not None and self.__active_key_synchronization_callback is not None:
-            c = []
-            r = []
-            for d_or_id in domain_or_keyId:
-                if not isinstance(d_or_id, str):
-                    if 'int' not in self._active_key_synchronization_df.literal:
-                        r.append(d_or_id)
-                    else:
-                        c.append(d_or_id)
-                else:
-                    if not self._active_key_synchronization_df.match_any(d_or_id):
-                        r.append(d_or_id)
-                    else:
-                        c.append(d_or_id)
+        c = []
+        r = []
+        has_active_callback = (
+            self._active_key_synchronization_df is not None
+            and self.__active_key_synchronization_callback is not None
+        )
 
-            if c:
+        for d_or_id in domain_or_keyId:
+            if not isinstance(d_or_id, str):
+                keyid = cast(Tuple[int, int], tuple(d_or_id))
+                if has_active_callback and 'int' in self._active_key_synchronization_df.literal:
+                    c.append(keyid)
+                elif self.isKDCKeyIdSupported(keyid):
+                    r.append(keyid)
+                else:
+                    raise AllGNFastCommands.transport.UnsupportedKeyType(
+                        self._unsupported_key_type_payload(keyid, source='request_kdc')
+                    )
+            else:
+                if has_active_callback and self._active_key_synchronization_df.match_any(d_or_id):
+                    c.append(d_or_id)
+                else:
+                    r.append(d_or_id)
+
+        if c:
+            try:
                 if self.__active_key_synchronization_callback_is_async:
                     a = await self.__active_key_synchronization_callback(c) # type: ignore
                 else:
                     a = self.__active_key_synchronization_callback(c)
+            except Exception as exc:
+                for item in c:
+                    if not isinstance(item, str) and not self.isKDCKeyIdSupported(item):
+                        raise AllGNFastCommands.transport.UnsupportedKeyType(
+                            self._unsupported_key_type_payload(
+                                item,
+                                source='active_key_synchronization_callback',
+                                reason='callback_exception',
+                                exception_type=type(exc).__name__,
+                                exception=str(exc),
+                            )
+                        )
+                raise
 
-                if not isinstance(a, list):
-                    raise AllGNFastCommands.kdc.InvalidResponseFormat('active_key_synchronization_callback must return list')
-                
-                for i, x in enumerate(a):
-                    if isinstance(x, bool):
-                        if x:
-                            r.append(c[i])
-                        else:
-                            continue
-                    else:
-                        out.append(x)
-            if r:
-                res = await self._requestKDC(r)
-                out.extend(res)
-        else:
-            rs = await self._requestKDC(domain_or_keyId)
-            out.extend(rs)
+            if not isinstance(a, list):
+                for item in c:
+                    if not isinstance(item, str) and not self.isKDCKeyIdSupported(item):
+                        raise AllGNFastCommands.transport.UnsupportedKeyType(
+                            self._unsupported_key_type_payload(
+                                item,
+                                source='active_key_synchronization_callback',
+                                reason='callback_returned_none' if a is None else 'callback_invalid_response',
+                            )
+                        )
+                raise AllGNFastCommands.kdc.InvalidResponseFormat('active_key_synchronization_callback must return list')
+
+            for item in c[len(a):]:
+                if not isinstance(item, str) and not self.isKDCKeyIdSupported(item):
+                    raise AllGNFastCommands.transport.UnsupportedKeyType(
+                        self._unsupported_key_type_payload(
+                            item,
+                            source='active_key_synchronization_callback',
+                            reason='callback_missing_result',
+                        )
+                    )
+            
+            for i, x in enumerate(a):
+                source_item = c[i] if i < len(c) else None
+                source_keyid = source_item if not isinstance(source_item, str) else None
+
+                if isinstance(x, bool):
+                    if source_item is None:
+                        raise AllGNFastCommands.kdc.InvalidResponseFormat(
+                            'active_key_synchronization_callback returned more boolean results than requested keys'
+                        )
+                    if x:
+                        if source_keyid is not None and not self.isKDCKeyIdSupported(source_keyid):
+                            raise AllGNFastCommands.transport.UnsupportedKeyType(
+                                self._unsupported_key_type_payload(
+                                    source_keyid,
+                                    source='active_key_synchronization_callback',
+                                    reason='callback_requested_kdc_for_unsupported_key_type',
+                                )
+                            )
+                        r.append(source_item)
+                    elif source_keyid is not None and not self.isKDCKeyIdSupported(source_keyid):
+                        raise AllGNFastCommands.transport.UnsupportedKeyType(
+                            self._unsupported_key_type_payload(
+                                source_keyid,
+                                source='active_key_synchronization_callback',
+                                reason='callback_declined_key',
+                            )
+                        )
+                    continue
+
+                if x is None or isinstance(x, GNResponse):
+                    if source_keyid is not None and not self.isKDCKeyIdSupported(source_keyid):
+                        details = {'reason': 'callback_returned_none' if x is None else 'callback_returned_error'}
+                        if isinstance(x, GNResponse):
+                            details['command'] = str(x.command)
+                        raise AllGNFastCommands.transport.UnsupportedKeyType(
+                            self._unsupported_key_type_payload(
+                                source_keyid,
+                                source='active_key_synchronization_callback',
+                                **details,
+                            )
+                        )
+                    if x is None:
+                        raise AllGNFastCommands.kdc.InvalidResponseFormat(
+                            'active_key_synchronization_callback returned None for requested key'
+                        )
+                    raise x
+
+                out.append(x)
+
+        if r:
+            unsupported = [
+                item for item in r
+                if not isinstance(item, str) and not self.isKDCKeyIdSupported(cast(Tuple[int, int], item))
+            ]
+            if unsupported:
+                keyid = cast(Tuple[int, int], unsupported[0])
+                raise AllGNFastCommands.transport.UnsupportedKeyType(
+                    self._unsupported_key_type_payload(keyid, source='request_kdc')
+                )
+
+            res = await self._requestKDC(r)
+            out.extend(res)
         
 
         for (keyId, domain, key) in out:

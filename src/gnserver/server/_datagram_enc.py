@@ -628,6 +628,10 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
         ])
         self.transport.sendMapped(packet, addr, _maddr=maddr)
 
+    def _send_prequic_transport_error(self, addr, error: GNResponse, error_code: int) -> None:
+        self._send_prequic_error(addr, error_code=error_code)
+        _prequic_log(f"pre-QUIC transport error sent addr={addr} code={error_code} command={error.command}")
+
     async def _is_kdc_bootstrap_allowed_for_local_domain(self) -> bool:
         if self._domain is None:
             return True
@@ -818,6 +822,25 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
             _prequic_log(
                 f"_init_encrypted_initial_connection confirmed-domain bypass keyid={keyid} domain={confirmed_domain!r}"
             )
+
+        if self._kdc.getKey(keyid) is None and not self._kdc.isKDCKeyIdSupported(keyid):
+            try:
+                await self._kdc.requestKeyIfNotExist(keyid)
+            except AllGNFastCommands.transport.UnsupportedKeyType as e:
+                connectionEnc.ready = None
+                self._send_prequic_transport_error(addr, e, error_code=3)
+                return None
+
+            if self._kdc.getKey(keyid) is None:
+                connectionEnc.ready = None
+                error = AllGNFastCommands.transport.UnsupportedKeyType({
+                    'keyid': keyid,
+                    'key_type': keyid[0],
+                    'source': 'initial_key_resolution',
+                    'reason': 'key_not_found_after_custom_synchronization',
+                })
+                self._send_prequic_transport_error(addr, error, error_code=3)
+                return None
 
         if not self._kdc._active_key_synchronization:
             key = self._kdc.getKey(keyid)
@@ -1363,6 +1386,12 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
 
         d = None
 
+        is_initial_system_packet = (
+            (data[0] & 0x01) != 0
+            and len(data) >= 2
+            and ((data[1] >> 4) & 0x0F) == 0
+        )
+
         if data[0] & 0x01: # если системный пакет.
             try:
                 sys_result = await self.__handle_datagram_sys(data, maddr, connectionEnc, addr)
@@ -1397,6 +1426,18 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
                     f'{connectionEnc.domain}'
                     f'{connectionEnc.keyid}'
                 )
+                if is_initial_system_packet:
+                    self._send_prequic_transport_error(
+                        addr,
+                        AllGNFastCommands.transport.EncryptionKeySynchronization({
+                            'keyid': connectionEnc.keyid,
+                            'domain': connectionEnc.domain,
+                            'source': 'prequic_initial_decrypt',
+                            'exception_type': type(e).__name__,
+                            'exception': str(e),
+                        }),
+                        error_code=2,
+                    )
                 return
         else:
             dec = datagram

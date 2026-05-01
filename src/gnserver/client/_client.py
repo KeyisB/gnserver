@@ -166,7 +166,7 @@ class AsyncClient:
         self.__response_callbacks[name] = callback
 
   
-    async def connect(self, request: GNRequest, restart_connection: bool = False, reconnect_wait: float = 10, keep_alive: bool = True) -> 'QuicClient':
+    async def connect(self, request: GNRequest, restart_connection: bool = False, reconnect_wait: float = 10, keep_alive: bool = True) -> Union['QuicClient', GNResponse]:
         domain = request.url.hostname
         connect_timeout = reconnect_wait or self._configuration.get('L5', {}).get('connection', {}).get('connect_timeout', 10)
         connect_lock = self._connect_locks.setdefault(domain, asyncio.Lock())
@@ -211,9 +211,11 @@ class AsyncClient:
                         raise AllGNFastCommands.transport.ConnectionError(
                             {'info': f'Не удалось подключится к серверу {domain}', 'traceback': traceback.format_exc()}
                         )
-                    except Exception:
+                    except Exception as e:
                         if self._active_connections.get(domain) is current:
                             await self.disconnect(domain)
+                        if isinstance(e, (GNResponse, GNFastCommand)):
+                            return e
                         raise AllGNFastCommands.transport.ConnectionError(
                             {'info': f'Не удалось подключится к серверу {domain}', 'traceback': traceback.format_exc()}
                         )
@@ -276,14 +278,18 @@ class AsyncClient:
         except asyncio.exceptions.CancelledError:
             await self.disconnect(domain)
             raise AllGNFastCommands.transport.ConnectionError({'info': f'Не удалось подключится к серверу {domain}', 'traceback': traceback.format_exc()})
-        except:
+        except Exception as e:
             await self.disconnect(domain)
+            if isinstance(e, (GNResponse, GNFastCommand)):
+                return e
             raise AllGNFastCommands.transport.ConnectionError({'info': f'Не удалось подключится к серверу {domain}', 'traceback': traceback.format_exc()})
 
         try:
             await c.connect_future
-        except Exception:
+        except Exception as e:
             await self.disconnect(domain)
+            if isinstance(e, (GNResponse, GNFastCommand)):
+                return e
             raise
 
         return c
@@ -335,10 +341,23 @@ class AsyncClient:
                 else:
                     return GNResponse(str(e), payload=traceback.format_exc())
 
+            if isinstance(c, GNResponse):
+                return c
 
             for f in self.__request_callbacks.values():
                 asyncio.create_task(f(request))
-            r = await c.asyncRequest(request, only_request=only_request)
+            try:
+                r = await c.asyncRequest(request, only_request=only_request)
+            except BaseException as e:
+                if isinstance(e, (GNResponse, GNFastCommand)):
+                    r = e
+                else:
+                    r = AllGNFastCommands.transport.ConnectionError({
+                        'source': 'client_request_async_request',
+                        'exception_type': type(e).__name__,
+                        'exception': str(e),
+                        'traceback': traceback.format_exc(),
+                    })
 
             # retry_connect_request = (
             #     isinstance(r, GNResponse)
@@ -379,8 +398,10 @@ class AsyncClient:
         else: # TODO
 
             c: Optional[QuicClient] = None
+            connect_error: Optional[GNResponse] = None
 
             async def wrapped(request) -> AsyncGenerator[GNRequest, None]:
+                nonlocal c, connect_error
                 async for req in request:
                     if req.gn_protocol is None:
                         req.setGNProtocol(self.__current_session['protocols'][0])
@@ -389,19 +410,47 @@ class AsyncClient:
                     for f in self.__request_callbacks.values():
                         asyncio.create_task(f(req))
 
-                    nonlocal c
                     if c is None:  # инициализируем при первом req
-                        c = await self.connect(request, restart_connection, reconnect_wait, keep_alive=keep_alive)
+                        try:
+                            connected = await self.connect(request, restart_connection, reconnect_wait, keep_alive=keep_alive)
+                        except BaseException as e:
+                            if isinstance(e, (GNResponse, GNFastCommand)):
+                                connect_error = e
+                            else:
+                                connect_error = GNResponse(str(e), payload=traceback.format_exc())
+                            return
+
+                        if isinstance(connected, GNResponse):
+                            connect_error = connected
+                            return
+
+                        c = connected
 
                     yield req
 
             gen = wrapped(request)
-            first_req = await gen.__anext__()
+            try:
+                first_req = await gen.__anext__()
+            except StopAsyncIteration:
+                if connect_error is not None:
+                    return connect_error
+                return AllGNFastCommands.transport.ConnectionError('unknown error')
 
             if c is None:
-                raise AllGNFastCommands.transport.ConnectionError('unknown error')
+                return connect_error or AllGNFastCommands.transport.ConnectionError('unknown error')
 
-            r = await c.asyncRequest(chain_async(first_req, gen))
+            try:
+                r = await c.asyncRequest(chain_async(first_req, gen))
+            except BaseException as e:
+                if isinstance(e, (GNResponse, GNFastCommand)):
+                    r = e
+                else:
+                    r = AllGNFastCommands.transport.ConnectionError({
+                        'source': 'client_request_stream_async_request',
+                        'exception_type': type(e).__name__,
+                        'exception': str(e),
+                        'traceback': traceback.format_exc(),
+                    })
 
             for f in self.__response_callbacks.values():
                 asyncio.create_task(f(r))
@@ -555,14 +604,41 @@ class RawQuicClient(QuicProtocolShell):
                 self._last_activity = time.time()
 
     def on_prequic_error(self, error_code: int, expected_enc_type: int) -> None:
+        payload = {
+            'domain': self._QuicClient.domain,
+            'prequic_error_code': error_code,
+            'expected_encryption_type': expected_enc_type,
+        }
+
         if error_code == 1:  # DifferentEncryptionType
-            fut = self._QuicClient.connect_future
-            if not fut.done():
-                fut.set_exception(
-                    AllGNFastCommands.cors.DifferentEncryptionType({
-                        'data': {'expected_encryption_type': expected_enc_type}
-                    })
-                )
+            error = AllGNFastCommands.cors.DifferentEncryptionType({
+                'data': {'expected_encryption_type': expected_enc_type}
+            })
+        elif error_code == 2:  # EncryptionKeySynchronization
+            error = AllGNFastCommands.transport.EncryptionKeySynchronization(payload)
+        elif error_code == 3:  # UnsupportedKeyType
+            error = AllGNFastCommands.transport.UnsupportedKeyType(payload)
+        else:
+            error = AllGNFastCommands.transport.TransportProtocolError(payload)
+
+        fut = self._QuicClient.connect_future
+        if not fut.done():
+            fut.set_exception(error)
+
+        waiter = getattr(self, '_connected_waiter', None)
+        if waiter is not None:
+            self._connected_waiter = None
+            if not waiter.done():
+                waiter.set_exception(error)
+
+        for inflight in list(self._inflight.values()):
+            if isinstance(inflight, asyncio.Future) and not inflight.done():
+                inflight.set_exception(error)
+        self._inflight.clear()
+
+        self.stop()
+        self.close(error_code=QuicErrorCode.NO_ERROR, reason_phrase=f'prequic error {error_code}')
+        self._closed.set()
 
     def stop(self):
         self._running = False
@@ -1025,6 +1101,8 @@ class QuicClient:
                 self.connect_future.set_result(True)
         except Exception as e:
             logger.error(f'Error connecting: {e}')
+            if not self.connect_future.done() and isinstance(e, (GNResponse, GNFastCommand)):
+                self.connect_future.set_exception(e)
             if not self.connect_future.done():
                 self.connect_future.set_exception(AllGNFastCommands.transport.ConnectionError({'info': f'Не удалось подключится к серверу {self.domain}', 'traceback': traceback.format_exc()}))
             await self._client_cm.__aexit__(None, None, None)
