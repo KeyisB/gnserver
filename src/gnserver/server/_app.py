@@ -85,7 +85,7 @@ class App:
     def __init__(self, only_client: bool = False):
         self._only_client = only_client
         self._routes: List[Route] = []
-        self._cors: Optional[CORSObject] = None
+        self._cors: Optional[CORSObject] = CORSObject()
         self._events: Dict[str, List[Dict[str, Union[Any, Callable]]]] = {}
 
         # Route indexes for hot path dispatch.
@@ -839,6 +839,7 @@ class App:
 
 
         self.client.setDomain(domain)
+
 
 
 
