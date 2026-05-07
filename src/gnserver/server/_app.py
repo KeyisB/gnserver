@@ -1043,11 +1043,9 @@ class App:
             return responses.ok(await _path_to_tdo(file_path))
 
     def _init_sys_routes(self):
-        @self.post('/!gn-vm-host/ping', cors=CORSObject(allow_client_types=['server', 'net']))
+        @self.post('/!gn-vm-host/ping', cors=CORSObject(allow_client_types=['local']))
         async def r_ping(request: GNRequest):
-            if request.client.ip not in ('::1', '127.0.0.1'):
-                raise AllGNFastCommands.Forbidden()
-            return responses.ok({'time': datetime.datetime.now(datetime.timezone.utc).isoformat()})
+            return responses.ok({'time': datetime.datetime.now(datetime.timezone.utc).isoformat(), 't': datetime.datetime.now(datetime.timezone.utc)})
 
 
 logger.info(f'PID: {os.getpid()}')
