@@ -440,6 +440,9 @@ class App:
                     result._gn_server_proxy_list = [r]  # type: ignore
                 else:
                     result._gn_server_proxy_list.append(r)  # type: ignore
+                if self._cors is not None:
+                    resolve_cors(request, self._cors)
+
                 return await self.dispatchRequest(result)
 
             if isinstance(result, (TempDataObject, TempDataGroup)):
@@ -449,6 +452,9 @@ class App:
                 c = r.cors
                 if c is not None:
                     resolve_cors(request, c)
+
+                if self._cors is not None:
+                    resolve_cors(request, self._cors)
 
                 if result.command.NoResponse:
                     return None
