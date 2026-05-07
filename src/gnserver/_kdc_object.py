@@ -440,6 +440,10 @@ class KDCObject:
         domain = self._inactive_transport_sessions_keyid_domain.pop(domain_or_keyid, None)
         if domain is not None:
             self._inactive_transport_sessions.pop(domain, None)
+
+    def clearInactiveTransportSessions(self) -> None:
+        self._inactive_transport_sessions.clear()
+        self._inactive_transport_sessions_keyid_domain.clear()
     
     def deleteKeyByDomain(self, domain: str) -> None:
         keyid = self._x_domain_keyId.pop(domain, None)

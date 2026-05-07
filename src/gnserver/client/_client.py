@@ -101,6 +101,7 @@ class AsyncClient:
 
         self._active_connections: Dict[str, QuicClient] = {}
         self._connect_locks: Dict[str, asyncio.Lock] = {}
+        self._domain_generation = 0
 
         self._dns_cache: TTLDict = TTLDict()
         
@@ -152,9 +153,65 @@ class AsyncClient:
 
         self._rcms_id = self._gn_crt_data.get('rcms_id', 0)
 
+    @staticmethod
+    def _consume_background_disconnect(task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+
+        try:
+            task.result()
+        except Exception:
+            logger.exception('Failed to close stale GN client connection after domain change')
+
+    @staticmethod
+    def _domain_change_runtime_error(previous_domain: Optional[str], domain: str) -> RuntimeError:
+        return RuntimeError(f'Client domain changed from {previous_domain!r} to {domain!r}')
+
+    def _disconnect_active_connections_for_domain_change(self, previous_domain: Optional[str], domain: str) -> None:
+        connections = tuple(self._active_connections.values())
+        if not connections:
+            return
+
+        self._active_connections.clear()
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        for connection in connections:
+            connection.status = 'disconnect'
+            if not connection.connect_future.done():
+                connection.connect_future.set_exception(self._domain_change_runtime_error(previous_domain, domain))
+            if not connection.ready.done():
+                connection.ready.set_exception(self._domain_change_runtime_error(previous_domain, domain))
+
+            if loop is not None:
+                task = loop.create_task(connection.disconnect(remember_inactive=False))
+                task.add_done_callback(self._consume_background_disconnect)
+
+        if loop is None:
+            logger.warning(
+                'Client domain changed from %r to %r: detached %d active connections, '
+                'but cannot close transports without a running event loop',
+                previous_domain,
+                domain,
+                len(connections),
+            )
+
     
     def setDomain(self, domain: str):
+        previous_domain = getattr(self, '_domain', None)
         self._domain = domain
+        if hasattr(self._kdc, '_domain'):
+            self._kdc._domain = domain
+
+        if previous_domain == domain:
+            return
+
+        self._domain_generation += 1
+        self._kdc.clearInactiveTransportSessions()
+        self._disconnect_active_connections_for_domain_change(previous_domain, domain)
 
     def setConfiguration(self, configuration: dict):
         self._configuration = configuration
@@ -193,6 +250,10 @@ class AsyncClient:
         while c is None:
             current = self._active_connections.get(domain)
             if current is not None:
+                if current._client_domain_generation != self._domain_generation:
+                    await self.disconnect(domain, remember_inactive=False)
+                    continue
+
                 if current.status == 'active' and current._quik_core is not None:
                     return current
 
@@ -248,7 +309,7 @@ class AsyncClient:
                 if current is not None:
                     continue
 
-                c = QuicClient(self, domain)
+                c = QuicClient(self, domain, self._domain_generation)
                 self._active_connections[domain] = c
                 creator = True
             finally:
@@ -256,6 +317,12 @@ class AsyncClient:
 
         if not creator:
             raise AllGNFastCommands.transport.ConnectionError({'info': f'Не удалось подключится к серверу {domain}', 'traceback': traceback.format_exc()})
+
+        if c._client_domain_generation != self._domain_generation:
+            await c.disconnect(remember_inactive=False)
+            raise AllGNFastCommands.transport.ConnectionError(
+                {'source': 'client_domain_changed', 'domain': domain, 'client_domain': getattr(self, '_domain', None)}
+            )
 
         data = await self.getDNS(domain, host=domain if request.url.isIp else None)
 
@@ -270,8 +337,13 @@ class AsyncClient:
                 self._active_connections.pop(domain)
 
         c._disconnect_signal = f # type: ignore
+
         try:
+            if c._client_domain_generation != self._domain_generation:
+                raise RuntimeError('Client domain changed before QUIC connect')
             await asyncio.wait_for(c.connect(data[0], data[1], keep_alive=keep_alive), connect_timeout)
+            if c._client_domain_generation != self._domain_generation:
+                raise RuntimeError('Client domain changed during QUIC connect')
         except asyncio.exceptions.TimeoutError:
             await self.disconnect(domain)
             raise AllGNFastCommands.transport.QuicHandshakeTimeout(f'Не удалось подключится к серверу {domain} (таймаут рукопожатия)')
@@ -294,11 +366,14 @@ class AsyncClient:
 
         return c
 
-    async def disconnect(self, domain):
-        if domain not in self._active_connections:
+    async def disconnect(self, domain, remember_inactive: bool = True):
+        connection = self._active_connections.get(domain)
+        if connection is None:
             return
         
-        await self._active_connections[domain].disconnect()
+        await connection.disconnect(remember_inactive=remember_inactive)
+        if self._active_connections.get(domain) is connection:
+            self._active_connections.pop(domain, None)
 
 
     def _return_token(self, bigToken: str, s: bool = True) -> str:
@@ -993,9 +1068,10 @@ class QuicClient:
         except Exception:
             return
 
-    def __init__(self, Client: AsyncClient, domain: str):
+    def __init__(self, Client: AsyncClient, domain: str, client_domain_generation: int):
         self._client = Client
         self.domain = domain
+        self._client_domain_generation = client_domain_generation
         self._quik_core: Optional[RawQuicClient] = None
         self._client_cm = None
         self._disconnect_signal = None
@@ -1006,8 +1082,12 @@ class QuicClient:
         self.connect_future.add_done_callback(self._consume_future_exception)
 
         self.ready = asyncio.get_running_loop().create_future()
+        self.ready.add_done_callback(self._consume_future_exception)
 
     async def connect(self, ip: str, port: int, keep_alive: bool = True):
+        if self._client_domain_generation != self._client._domain_generation:
+            raise RuntimeError('Client domain changed before QUIC connect')
+
         self.status = 'connecting'
         cfg = QuicConfiguration(is_client=True, alpn_protocols=["gn:backend"])
         cfg.load_verify_locations(cadata=crt_client)
@@ -1086,6 +1166,9 @@ class QuicClient:
         try:
             self._quik_core = await self._client_cm.__aenter__() # type: ignore
             self._quik_core.quicClient = self
+            if self._client_domain_generation != self._client._domain_generation:
+                raise RuntimeError('Client domain changed during QUIC connect')
+
 
             self.status = 'active'
 
@@ -1107,12 +1190,13 @@ class QuicClient:
                 self.connect_future.set_exception(AllGNFastCommands.transport.ConnectionError({'info': f'Не удалось подключится к серверу {self.domain}', 'traceback': traceback.format_exc()}))
             await self._client_cm.__aexit__(None, None, None)
 
-    async def disconnect(self):
+    async def disconnect(self, remember_inactive: bool = True):
         self.status = 'disconnect'
         
         if self._quik_core is not None:
             try:
-                self._quik_core.datagramEndpoint.markProtocolInactive(self._quik_core)
+                if remember_inactive:
+                    self._quik_core.datagramEndpoint.markProtocolInactive(self._quik_core)
             except Exception:
                 pass
 
@@ -1146,6 +1230,10 @@ class QuicClient:
 
 
     async def asyncRequest(self, request: GNRequest, only_request: bool = False):
+        if self._client_domain_generation != self._client._domain_generation:
+            await self.disconnect(remember_inactive=False)
+            raise RuntimeError('Client domain changed before request send')
+
         if self.status != 'active':
             await self.ready
             if self.status != 'active':
