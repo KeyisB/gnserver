@@ -53,9 +53,9 @@ __all__ = [
 
 from .server._gnserver import GNServer
 from .server._app import App
-from .server._models import DEPConfig
+from .server._models import DEPConfig, CORSObject
 
-from gnobjects.net.objects import Url, GNRequest, GNResponse, CommandObject, CORSObject, FileObject, GNTransportProtocol, TempDataGroup, TempDataObject
+from gnobjects.net.objects import Url, GNRequest, GNResponse, CommandObject, FileObject, GNTransportProtocol, TempDataGroup, TempDataObject
 from gnobjects.net.objects import AllGNFastCommands as response
 
 responses = response

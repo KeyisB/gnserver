@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Union, get_origin, get_args
 
 
-from gnobjects.net.objects import CORSObject
+from ._models import CORSObject
 
 @dataclass
 class Route:

@@ -24,7 +24,7 @@ from pathlib import Path
 P = ParamSpec("P")
 R = TypeVar("R")
 
-from gnobjects.net.objects import GNRequest, GNResponse, FileObject, CORSObject, TempDataGroup, TempDataObject, Url
+from gnobjects.net.objects import GNRequest, GNResponse, FileObject, TempDataGroup, TempDataObject, Url
 from gnobjects.net.fastcommands import AllGNFastCommands, GNFastCommand, AllGNFastCommands as responses
 
 
@@ -40,7 +40,7 @@ from .._gn_pq_quic import GNQuicServer
 
 from ._datagram_enc import QuicProtocolShell, DatagramEndpoint
 
-from ._models import DEPConfig
+from ._models import DEPConfig, CORSObject
 
 
 

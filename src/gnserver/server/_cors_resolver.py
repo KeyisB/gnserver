@@ -2,8 +2,9 @@
 import re
 from typing import Optional
 from urllib.parse import urlparse
-from gnobjects.net.objects import GNRequest, CORSObject
+from gnobjects.net.objects import GNRequest
 from gnobjects.net.fastcommands import AllGNFastCommands
+from ._models import CORSObject
 
 def _resolve_cors(origin_url: str, rules: list[str]) -> bool:
     """

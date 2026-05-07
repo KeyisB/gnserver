@@ -1,6 +1,7 @@
 
 import inspect
-from typing import Callable, Awaitable
+from collections.abc import Awaitable, Callable
+from typing import Any, Literal
 
 from gnobjects.net.tools import DomainMatcherList, DomainMatcherDict
 
@@ -136,3 +137,85 @@ class DEPConfig:
         if self._established_callable_is_async:
             result = await result
         return result
+
+
+
+
+class CORSObject:
+    def __init__(self,
+                 allow_origins: list[str] | None = None,
+                 allow_object_types: list[Literal['user', 'service', 'freenet', 'company', 'project', 'product']] = ['user', 'service'],
+                 allow_client_types: list[Literal['net', 'client', 'server', 'local']] = ['net', 'local', 'server'],
+                 allow_methods: list[str] | None = None,
+                 allow_transport_protocols: list[str] | None = None,
+                 allow_route_protocols: list[str] | None = None,
+                 allow_request_protocols: list[str] | None = None
+                 ) -> None:
+        """
+        # Механизм контроля доступа
+
+
+        :allow_origins: Список доменов, с которых разрешен запрос.
+        :allow_object_types: Какие типы объектов могут быть доступны.
+        
+        - `net` - Пользователи и другие службы сети `GN`
+
+        - `client` - (TBD) Пользователи напрямую. Без использования прокси серверов сети `GN`
+
+        - `server` - Другие `origin` сервера сети `GN`
+
+        - `local` - Локальные клиенты
+
+        :allow_client_types: Какие типы клиентов могут использовать.
+
+        - `freenet` - доступ для неидентифицируемых объектов из web2.
+
+
+
+        :allow_transport_protocols: (TBD)
+        :allow_route_protocols: (TBD)
+        :allow_request_protocols: (TBD)
+        """
+        self.allow_origins = allow_origins
+        self.allow_methods = allow_methods
+        self.allow_object_types = allow_object_types
+        self.allow_client_types = allow_client_types
+        self.allow_transport_protocols = allow_transport_protocols
+        self.allow_route_protocols = allow_route_protocols
+        self.allow_request_protocols = allow_request_protocols
+
+            
+
+
+    
+    def serialize(self) -> bytes | None:
+        a = {}
+        if self.allow_origins is not None:
+            a[0] = self.allow_origins
+        if self.allow_methods is not None:
+            a[1] = self.allow_methods
+        if self.allow_client_types is not None and self.allow_client_types != ['net']:
+            a[2] = self.allow_client_types
+        if self.allow_transport_protocols is not None:
+            a[3] = self.allow_transport_protocols
+        if self.allow_route_protocols is not None:
+            a[4] = self.allow_route_protocols
+        if self.allow_request_protocols is not None:
+            a[5] = self.allow_request_protocols
+        if not a:
+            return None
+        else:
+            return serialize(a)
+        
+
+    @staticmethod
+    def deserialize(data: dict[int, Any]) -> 'CORSObject':
+        return CORSObject(
+            allow_origins=data.get(0, None),
+            allow_methods=data.get(1, None),
+            allow_client_types=data.get(2, ['net']),
+
+            allow_transport_protocols=data.get(3, None),
+            allow_route_protocols=data.get(4, None),
+            allow_request_protocols=data.get(5, None)
+        )
