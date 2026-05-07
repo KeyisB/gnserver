@@ -1000,7 +1000,7 @@ class App:
                 host=data.get('host', '0.0.0.0')
             )
 
-    def fastFile(self, path: str, file_path: str | Path):
+    def fastFile(self, path: str, file_path: str | Path, cors: CORSObject | None = None):
         path = path.strip()
         if not path:
             path = '/'
@@ -1014,11 +1014,12 @@ class App:
         if file_path.endswith('/') and file_path != '/':
             file_path = file_path[:-1]
 
-        @self.get(path) # type: ignore
+        @self.get(path, cors=cors) # type: ignore
         async def r_static():
             return responses.ok(await _path_to_tdo(file_path))
+            
 
-    def staticDir(self, path: str, dir_path: str | Path):
+    def staticDir(self, path: str, dir_path: str | Path, cors: CORSObject | None = None):
         if isinstance(dir_path, Path):
             dir_path = str(dir_path)
 
@@ -1032,7 +1033,7 @@ class App:
 
         wildcard_path = f"{path}/{{_path:path}}" if path != '/' else "/{_path:path}"
 
-        @self.get(wildcard_path)  # type: ignore
+        @self.get(wildcard_path, cors=cors)  # type: ignore
         async def r_static(_path: str):
             file_path = os.path.join(dir_path, _path)
             
