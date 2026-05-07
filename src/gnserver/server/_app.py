@@ -452,9 +452,9 @@ class App:
                 c = r.cors
                 if c is not None:
                     resolve_cors(request, c)
-
-                if self._cors is not None:
-                    resolve_cors(request, self._cors)
+                else:
+                    if self._cors is not None:
+                        resolve_cors(request, self._cors)
 
                 if result.command.NoResponse:
                     return None
