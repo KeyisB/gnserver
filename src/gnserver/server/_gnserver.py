@@ -86,10 +86,10 @@ class GNServer(App):
         gn_server_crt_ = self._get_gn_server_crt(gn_server_crt, domain) if not isinstance(gn_server_crt, dict) else gn_server_crt
 
 
-        if 'GNServer' in gn_server_crt_:
-            if 'logConfig' in gn_server_crt_['GNServer']:
+        if 'GNServer' in self.fromHostConfig:
+            if 'logConfig' in self.fromHostConfig['GNServer']:
                 from ..config import update_log_config
-                update_log_config(gn_server_crt_['GNServer']['logConfig'])
+                update_log_config(self.fromHostConfig['GNServer']['logConfig'])
 
         self._gn_pq_server_settings = extract_gn_pq_server_settings(gn_server_crt_)
 

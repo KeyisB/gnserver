@@ -25,6 +25,9 @@ logConfig = {
 }
 
 def update_log_config(config: dict):
+    if 'level' in config:
+        logConfig['level'] = config['level']
+
     for logger_name, logger_config in config.get('loggers', {}).items():
         if isinstance(logger_config, dict):
             if logger_name in logConfig['loggers']:
@@ -32,7 +35,7 @@ def update_log_config(config: dict):
             else:
                 logConfig['loggers'][logger_name] = logger_config
     
-    l = logConfig.get('level')
+    l = config.get('level')
     if l is not None:
         for logger_name in logConfig['loggers']:
             logConfig['loggers'][logger_name]['level'] = l # type: ignore
