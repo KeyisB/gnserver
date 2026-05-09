@@ -60,6 +60,7 @@ import asyncio
 #t = TempDataObject('html', b'<html><body>Hello, World!</body></html>')
 
 t = TempDataObject.STP('sdfdsgfsgsfgfd')
+t = TempDataObject.ITP('sdfdsgfsgsfgfd')
 
 r = GNRequest('', Url('gn://test.com/test'), payload=t)
 
@@ -69,7 +70,10 @@ des = GNRequest.deserialize(s)
 
 
 async def main():
-	print(await des.iter.raw())
+	print(await des.payload)
+
+
+	async with des.iter.currentPayload
 
 
 asyncio.run(main())

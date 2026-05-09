@@ -958,26 +958,12 @@ class RawQuicClient(QuicProtocolShell):
         if isinstance(data, GNResponse):
             return data
         
-        logger.debug(f'Deserializing response on stream {sid}...')
-
-        r = self._deserialize(data, False)
-        return r
-    
-
-    async def _serialize(self, d: Union[GNRequest, GNResponse]) -> bytes:
-        #TODO
-
-        if isinstance(d, GNRequest):
-            return d.serialize()
-        return d.serialize()
-            
-
-    def _deserialize(self, b: bytes, req: bool) -> Union[GNRequest, GNResponse]:
-        #TODO
-        
-        if req:
-            return GNRequest.deserialize(b)
-        return GNResponse.deserialize(b)
+        logger.error(f'Unexpected response type on stream {sid}: {type(data)!r}')
+        return _build_transport_connection_error(
+            domain=self._QuicClient.domain,
+            source='unexpected_response_type',
+            details={'response_type': type(data).__name__},
+        )
         
     # def _upgradeConnection(self, alg: str, later: bool = True) -> None:
     #     if alg not in self._connection_upgrades:
