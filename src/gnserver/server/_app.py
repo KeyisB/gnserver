@@ -696,10 +696,9 @@ class App:
                 self._buffer.pop(stream_id, None)
                 state = self._streams.get(stream_id)
                 if state is not None and state.get('request') is request:
-                    payload_state = getattr(request, '_payload_state', None)
+                    payload_state = request._payload_state
                     if (
-                        payload_state is None
-                        or payload_state.payloadComplete
+                        payload_state.payloadComplete
                         or payload_state.payloadIncomplete
                     ):
                         self._streams.pop(stream_id, None)

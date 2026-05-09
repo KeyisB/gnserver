@@ -106,6 +106,7 @@ class ConnectionEncryptor:
         self.initial_send_task: Optional[asyncio.Task] = None
         self.key_fetching = False
         self._prev_key_in: Optional[bytes] = None
+        self._pending_key_out: Optional[bytes] = None
         self.__rng = random.Random(int.from_bytes(os.urandom(32), 'big'))
 
     def rand2(self) -> int:
@@ -168,14 +169,13 @@ class ConnectionEncryptor:
 
     def applyPendingKeyOut(self) -> None:
         """Apply the deferred _key_out switch queued by setSessionRoot64_receive_only."""
-        pending = getattr(self, '_pending_key_out', None)
-        if pending is not None:
-            self._key_out = pending
+        if self._pending_key_out is not None:
+            self._key_out = self._pending_key_out
             self._pending_key_out = None
             _prequic_log(f"applyPendingKeyOut applied for domain={self.domain!r}")
 
     def hasPendingKeyOut(self) -> bool:
-        return getattr(self, '_pending_key_out', None) is not None
+        return self._pending_key_out is not None
 
     def hasTransportKeys(self) -> bool:
         return hasattr(self, '_key_in') and hasattr(self, '_key_out')
@@ -374,17 +374,17 @@ class QuicProtocolShell(QuicConnectionProtocol):
         self._quic._max_datagram_size = self._upd_datagram_size
 
     def _stream_send_buffered_bytes(self, stream_id: int) -> int:
-        stream = getattr(self._quic, "_streams", {}).get(stream_id)
-        sender = getattr(stream, "sender", None)
-        if sender is None:
+        stream = self._quic._streams.get(stream_id)
+        if stream is None:
             return 0
-        start = int(getattr(sender, "_buffer_start", 0) or 0)
-        stop = int(getattr(sender, "_buffer_stop", 0) or 0)
+        sender = stream.sender
+        start = int(sender._buffer_start or 0)
+        stop = int(sender._buffer_stop or 0)
         return max(0, stop - start)
 
     async def _drain_stream_send_buffer(self, stream_id: int) -> None:
-        dep_config = getattr(self.datagramEndpoint, "DEPConfig", None)
-        high = int(getattr(dep_config, "stream_send_high_watermark", 0) or 0)
+        dep_config = self.datagramEndpoint.DEPConfig
+        high = int(dep_config.stream_send_high_watermark or 0)
         if high <= 0:
             return
 
@@ -392,9 +392,9 @@ class QuicProtocolShell(QuicConnectionProtocol):
         if buffered <= high:
             return
 
-        low = int(getattr(dep_config, "stream_send_low_watermark", high) or high)
+        low = int(dep_config.stream_send_low_watermark or high)
         low = max(0, min(low, high))
-        interval = float(getattr(dep_config, "stream_send_drain_interval", 0.001) or 0.0)
+        interval = float(dep_config.stream_send_drain_interval or 0.0)
 
         while self._stream_send_buffered_bytes(stream_id) > low:
             self.transmit()
@@ -617,9 +617,9 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
 
         self.DEPConfig: DEPConfig = dEPConfig
 
-        self._inbound_workers = max(1, int(getattr(self.DEPConfig, 'incoming_datagram_workers', 1)))
-        self._inbound_queue_size = max(1, int(getattr(self.DEPConfig, 'incoming_datagram_queue_size', 8192)))
-        self._inbound_global_lock_enabled = bool(getattr(self.DEPConfig, 'incoming_datagram_global_lock', False))
+        self._inbound_workers = max(1, int(self.DEPConfig.incoming_datagram_workers))
+        self._inbound_queue_size = max(1, int(self.DEPConfig.incoming_datagram_queue_size))
+        self._inbound_global_lock_enabled = bool(self.DEPConfig.incoming_datagram_global_lock)
         self._inbound_queues: List[Queue] = [Queue(maxsize=self._inbound_queue_size) for _ in range(self._inbound_workers)]
         self._inbound_tasks: List[asyncio.Task] = []
         self._inbound_started = False
@@ -742,7 +742,7 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
         )
 
     def _inactive_transport_session_limit(self) -> int:
-        return max(1, int(getattr(self.DEPConfig, 'max_inactive_transport_sessions', 8192) or 1))
+        return max(1, int(self.DEPConfig.max_inactive_transport_sessions or 1))
 
     def _remember_inactive_connection(self, connectionEnc: ConnectionEncryptor) -> None:
         root64 = connectionEnc.getSessionRoot64()
