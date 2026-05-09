@@ -5,7 +5,7 @@ import asyncio
 import datetime
 from itertools import count
 from collections import deque
-from typing import Any, Awaitable, Dict, Deque, Tuple, Union, Optional, AsyncGenerator, Callable, Literal, AsyncIterable, cast, overload, Coroutine, List, TYPE_CHECKING
+from typing import Any, Awaitable, Dict, Deque, Tuple, Union, Optional, Callable, Literal, cast, overload, Coroutine, List, TYPE_CHECKING
 from aioquic.quic.events import QuicEvent, StreamDataReceived, StreamReset, ConnectionTerminated, HandshakeCompleted
 from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.connection import QuicConnection
@@ -66,11 +66,6 @@ def _build_transport_connection_error(
 
 
 
-
-async def chain_async(first_item, rest: AsyncIterable) -> AsyncGenerator:
-    yield first_item
-    async for x in rest:
-        yield x
 
 """
 L1 - Physical
@@ -402,6 +397,8 @@ class AsyncClient:
         return request
 
     async def request(self, request: GNRequest, keep_alive: bool = True, restart_connection: bool = False, reconnect_wait: float = 10, only_request: bool = False) -> GNResponse:
+        if not isinstance(request, GNRequest):
+            raise TypeError(f'AsyncClient.request expects GNRequest, got {type(request).__name__}')
 
         logger.debug(f'Request: {request.method} {request.url}')
 
@@ -470,70 +467,6 @@ class AsyncClient:
 
             return r # type: ignore
         
-        else: # TODO
-
-            c: Optional[QuicClient] = None
-            connect_error: Optional[GNResponse] = None
-
-            async def wrapped(request) -> AsyncGenerator[GNRequest, None]:
-                nonlocal c, connect_error
-                async for req in request:
-                    if req.gn_protocol is None:
-                        req.setGNProtocol(self.__current_session['protocols'][0])
-                    req._stream = True
-
-                    for f in self.__request_callbacks.values():
-                        asyncio.create_task(f(req))
-
-                    if c is None:  # инициализируем при первом req
-                        try:
-                            connected = await self.connect(request, restart_connection, reconnect_wait, keep_alive=keep_alive)
-                        except BaseException as e:
-                            if isinstance(e, (GNResponse, GNFastCommand)):
-                                connect_error = e
-                            else:
-                                connect_error = GNResponse(str(e), payload=traceback.format_exc())
-                            return
-
-                        if isinstance(connected, GNResponse):
-                            connect_error = connected
-                            return
-
-                        c = connected
-
-                    yield req
-
-            gen = wrapped(request)
-            try:
-                first_req = await gen.__anext__()
-            except StopAsyncIteration:
-                if connect_error is not None:
-                    return connect_error
-                return AllGNFastCommands.transport.ConnectionError('unknown error')
-
-            if c is None:
-                return connect_error or AllGNFastCommands.transport.ConnectionError('unknown error')
-
-            try:
-                r = await c.asyncRequest(chain_async(first_req, gen))
-            except BaseException as e:
-                if isinstance(e, (GNResponse, GNFastCommand)):
-                    r = e
-                else:
-                    r = AllGNFastCommands.transport.ConnectionError({
-                        'source': 'client_request_stream_async_request',
-                        'exception_type': type(e).__name__,
-                        'exception': str(e),
-                        'traceback': traceback.format_exc(),
-                    })
-
-            for f in self.__response_callbacks.values():
-                asyncio.create_task(f(r))
-
-            return r
-
-
-
     async def getDNS(self, domain: str, use_cache: bool = True, keep_alive: bool = False, host: Optional[str] = None) -> str:
 
         if domain in self._dns_inflight:
