@@ -37,6 +37,10 @@ class DEPConfig:
                  incoming_datagram_queue_size: int = 8192,
                  incoming_datagram_global_lock: bool = False,
                  max_inactive_transport_sessions: int = 8192,
+                 stream_send_high_watermark: int = 16 * 1024 * 1024,
+                 stream_send_low_watermark: int = 8 * 1024 * 1024,
+                 stream_send_drain_interval: float = 0.001,
+                 iter_payload_chunk_size: int = 1024 * 1024,
                  ) -> None:
         """
         # Datagram Encryption Protocol Config
@@ -81,6 +85,12 @@ class DEPConfig:
         self.incoming_datagram_queue_size = max(1, int(incoming_datagram_queue_size or 1))
         self.incoming_datagram_global_lock = bool(incoming_datagram_global_lock)
         self.max_inactive_transport_sessions = max(1, int(max_inactive_transport_sessions or 1))
+        self.stream_send_high_watermark = max(0, int(stream_send_high_watermark or 0))
+        self.stream_send_low_watermark = max(0, int(stream_send_low_watermark or 0))
+        if self.stream_send_high_watermark and self.stream_send_low_watermark > self.stream_send_high_watermark:
+            self.stream_send_low_watermark = self.stream_send_high_watermark
+        self.stream_send_drain_interval = max(0.0, float(stream_send_drain_interval))
+        self.iter_payload_chunk_size = max(1, int(iter_payload_chunk_size or 1))
 
         self._kdc_allowed_domains_matcher = DomainMatcherList(self.kdc_allowed_domains) if self.kdc_allowed_domains is not None else None
 

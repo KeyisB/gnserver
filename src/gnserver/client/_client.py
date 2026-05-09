@@ -893,18 +893,21 @@ class RawQuicClient(QuicProtocolShell):
             self._inflight[sid] = fut
 
         header = request.serializeHeader()
-        has_payload = request.payloadSize > 0
+        has_payload = request.hasPayload
 
         self._quic.send_stream_data(sid, header, end_stream=not has_payload)
         self._schedule_flush()
+        await self._drain_stream_send_buffer(sid)
 
         if has_payload:
             async for chunk in request.iterSerializedPayload():
                 self._quic.send_stream_data(sid, chunk, end_stream=False)
                 self._schedule_flush()
+                await self._drain_stream_send_buffer(sid)
 
             self._quic.send_stream_data(sid, b'', end_stream=True)
             self._schedule_flush()
+            await self._drain_stream_send_buffer(sid)
         elif only_request:
             return AllGNFastCommands.transport.NoResponse()
 

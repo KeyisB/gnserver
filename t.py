@@ -69,7 +69,7 @@ des = GNRequest.deserialize(s)
 
 
 async def main():
-	print(await des.payload)
+	print(await des.iter.raw())
 
 
 asyncio.run(main())

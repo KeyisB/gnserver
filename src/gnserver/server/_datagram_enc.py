@@ -373,6 +373,33 @@ class QuicProtocolShell(QuicConnectionProtocol):
     def setDefault_max_datagram_size(self):
         self._quic._max_datagram_size = self._upd_datagram_size
 
+    def _stream_send_buffered_bytes(self, stream_id: int) -> int:
+        stream = getattr(self._quic, "_streams", {}).get(stream_id)
+        sender = getattr(stream, "sender", None)
+        if sender is None:
+            return 0
+        start = int(getattr(sender, "_buffer_start", 0) or 0)
+        stop = int(getattr(sender, "_buffer_stop", 0) or 0)
+        return max(0, stop - start)
+
+    async def _drain_stream_send_buffer(self, stream_id: int) -> None:
+        dep_config = getattr(self.datagramEndpoint, "DEPConfig", None)
+        high = int(getattr(dep_config, "stream_send_high_watermark", 0) or 0)
+        if high <= 0:
+            return
+
+        buffered = self._stream_send_buffered_bytes(stream_id)
+        if buffered <= high:
+            return
+
+        low = int(getattr(dep_config, "stream_send_low_watermark", high) or high)
+        low = max(0, min(low, high))
+        interval = float(getattr(dep_config, "stream_send_drain_interval", 0.001) or 0.0)
+
+        while self._stream_send_buffered_bytes(stream_id) > low:
+            self.transmit()
+            await asyncio.sleep(interval)
+
     def _debug_runtime_state(self) -> str:
         tls_context = getattr(self._quic, 'tls', None)
         tls_state = getattr(tls_context, 'state', None)

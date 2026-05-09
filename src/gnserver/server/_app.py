@@ -73,12 +73,11 @@ logger.addHandler(console)
 
 _Name = Union[Literal['start'], str]
 
-async def _path_to_tdo(path: str) -> TempDataObject:
+def _path_to_iter_tdo(path: str, chunk_size: int) -> AsyncGenerator[bytes, None]:
     if not os.path.isfile(path):
         raise AllGNFastCommands.NotFound({'code': 3, 'message': f'File not found: {path}'})
 
-    tdo = await FileObject(path).toTempDataObject()
-    return tdo
+    return FileObject(path).toIterTempDataObject(chunk_size=chunk_size)
 
 
 class App:
@@ -695,7 +694,15 @@ class App:
                     logger.error('Raw request error response failed:\n' + traceback.format_exc())
             finally:
                 self._buffer.pop(stream_id, None)
-                self._streams.pop(stream_id, None)
+                state = self._streams.get(stream_id)
+                if state is not None and state.get('request') is request:
+                    payload_state = getattr(request, '_payload_state', None)
+                    if (
+                        payload_state is None
+                        or payload_state.payloadComplete
+                        or payload_state.payloadIncomplete
+                    ):
+                        self._streams.pop(stream_id, None)
 
         async def _resolve_dev_transport_request(self, request: GNRequest):
             if not request.transportObject.routeProtocol.dev:
@@ -788,10 +795,11 @@ class App:
 
         async def sendRawResponse(self, stream_id: int, response: GNResponse, end_stream: bool = True):
             header = response.serializeHeader()
-            has_payload = response.payloadSize > 0
+            has_payload = response.hasPayload
 
             self._quic.send_stream_data(stream_id, header, end_stream=end_stream and not has_payload) # type: ignore
             self.transmit()
+            await self._drain_stream_send_buffer(stream_id)
 
             if not has_payload:
                 return
@@ -799,18 +807,21 @@ class App:
             async for chunk in response.iterSerializedPayload():
                 self._quic.send_stream_data(stream_id, chunk, end_stream=False) # type: ignore
                 self.transmit()
+                await self._drain_stream_send_buffer(stream_id)
 
             if end_stream:
                 self._quic.send_stream_data(stream_id, b'', end_stream=True) # type: ignore
                 self.transmit()
+                await self._drain_stream_send_buffer(stream_id)
         
         async def sendRequest(self, request: GNRequest, end_stream: bool = True):
             sid = self._quic.get_next_available_stream_id()
             header = request.serializeHeader()
-            has_payload = request.payloadSize > 0
+            has_payload = request.hasPayload
 
             self._quic.send_stream_data(sid, header, end_stream=end_stream and not has_payload)
             self.transmit()
+            await self._drain_stream_send_buffer(sid)
 
             if not has_payload:
                 return
@@ -818,10 +829,12 @@ class App:
             async for chunk in request.iterSerializedPayload():
                 self._quic.send_stream_data(sid, chunk, end_stream=False)
                 self.transmit()
+                await self._drain_stream_send_buffer(sid)
 
             if end_stream:
                 self._quic.send_stream_data(sid, b'', end_stream=True)
                 self.transmit()
+                await self._drain_stream_send_buffer(sid)
 
     def run(
         self,
@@ -1016,7 +1029,7 @@ class App:
 
         @self.get(path, cors=cors) # type: ignore
         async def r_static():
-            return responses.ok(await _path_to_tdo(file_path))
+            return responses.ok(_path_to_iter_tdo(file_path, self.DEPConfig.iter_payload_chunk_size))
             
 
     def staticDir(self, path: str, dir_path: str | Path, cors: CORSObject | None = None):
@@ -1040,7 +1053,7 @@ class App:
             if file_path.endswith('/') and file_path != '/':
                 file_path = file_path[:-1]
                 
-            return responses.ok(await _path_to_tdo(file_path))
+            return responses.ok(_path_to_iter_tdo(file_path, self.DEPConfig.iter_payload_chunk_size))
 
     def _init_sys_routes(self):
         @self.post('/!gn-vm-host/ping', cors=CORSObject(allow_client_types=['local']))
