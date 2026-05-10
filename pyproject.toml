@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "GNServer"
-version = "0.0.207"
+version = "0.0.208"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

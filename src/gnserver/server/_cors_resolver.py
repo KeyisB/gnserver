@@ -139,10 +139,12 @@ def resolve_cors(request: GNRequest, cors: CORSObject | None) -> None:
         return
     
     if request.client.type not in cors.allow_client_types and request.client.type_int != 0:
-        raise AllGNFastCommands.cors.ClientTypeNotAllowed({'message': f'Client type {request.client.type} not allowed for CORS. Allowed {cors.allow_client_types}'})
+        if cors.except_client_types_domains is None or request.client.domain not in cors.except_client_types_domains:
+            raise AllGNFastCommands.cors.ClientTypeNotAllowed({'message': f'Client type {request.client.type} not allowed for CORS. Allowed {cors.allow_client_types}'})
     
     if request.client.type == 'net' and request.object.type not in cors.allow_object_types and request.client.type_int != 0:
-        raise AllGNFastCommands.cors.ObjectTypeNotAllowed({'message': f'Object type {request.object.type} not allowed for CORS. Allowed {cors.allow_object_types}'})
+        if cors.except_object_types_domains is None or request.client.domain not in cors.except_object_types_domains:
+            raise AllGNFastCommands.cors.ObjectTypeNotAllowed({'message': f'Object type {request.object.type} not allowed for CORS. Allowed {cors.allow_object_types}'})
 
     if cors.allow_origins is not None:
         if request._origin is None:

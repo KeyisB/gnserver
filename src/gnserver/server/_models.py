@@ -159,7 +159,9 @@ class CORSObject:
                  allow_methods: list[str] | None = None,
                  allow_transport_protocols: list[str] | None = None,
                  allow_route_protocols: list[str] | None = None,
-                 allow_request_protocols: list[str] | None = None
+                 allow_request_protocols: list[str] | None = None,
+                 except_object_types_domains: list[str] | None = None,
+                 except_client_types_domains: list[str] | None = None
                  ) -> None:
         """
         # Механизм контроля доступа
@@ -180,6 +182,10 @@ class CORSObject:
 
         - `freenet` - доступ для неидентифицируемых объектов из web2.
 
+        :except_object_types_domains: list[str] : Домены, которые будут допущены без проверки allow_object_types
+        
+        :except_client_types_domains: list[str] : Домены, которые будут допущены без проверки allow_client_types
+
 
 
         :allow_transport_protocols: (TBD)
@@ -193,6 +199,8 @@ class CORSObject:
         self.allow_transport_protocols = allow_transport_protocols
         self.allow_route_protocols = allow_route_protocols
         self.allow_request_protocols = allow_request_protocols
+        self.except_object_types_domains = except_object_types_domains
+        
 
             
 
