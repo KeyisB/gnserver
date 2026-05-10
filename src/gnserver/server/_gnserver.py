@@ -23,6 +23,8 @@ class GNServer(App):
         self.vmhostConfig: dict = {}
         self.fromHostConfig = self.vmhostConfig
 
+        self.rcms_id: int | None = None
+
         
         try:
             self._readFromHostConfig()
@@ -170,6 +172,8 @@ class GNServer(App):
 
             
         self.domain = data.get('domain', self.domain)
+        
+        self.rcms_id = data.get('rcms_id')
 
         if not isinstance(data, dict):
             raise Exception('data is not dict')

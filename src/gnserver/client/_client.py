@@ -117,7 +117,6 @@ class AsyncClient:
 
         self._dns_inflight: Dict[str, asyncio.Future] = {}
 
-        self._rcms_id: int = 0
 
         # First DNS core: TLS only (encType 0)
         self._kdc.setDomainEcryptionType(AsyncClient._dns_core__ipv6, 0)
@@ -146,7 +145,6 @@ class AsyncClient:
             active_key_synchronization_callback_domainFilter
         )
 
-        self._rcms_id = self._gn_crt_data.get('rcms_id', 0)
 
     @staticmethod
     def _consume_background_disconnect(task: asyncio.Task) -> None:
