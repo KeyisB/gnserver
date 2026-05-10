@@ -803,7 +803,7 @@ class App:
             if not has_payload:
                 return
 
-            async for chunk in response.iterSerializedPayload():
+            async for chunk in response.iterSerializedPayload(self.datagramEndpoint.DEPConfig.iter_payload_chunk_size):
                 self._quic.send_stream_data(stream_id, chunk, end_stream=False) # type: ignore
                 self.transmit()
                 await self._drain_stream_send_buffer(stream_id)
@@ -825,7 +825,7 @@ class App:
             if not has_payload:
                 return
 
-            async for chunk in request.iterSerializedPayload():
+            async for chunk in request.iterSerializedPayload(self.datagramEndpoint.DEPConfig.iter_payload_chunk_size):
                 self._quic.send_stream_data(sid, chunk, end_stream=False)
                 self.transmit()
                 await self._drain_stream_send_buffer(sid)

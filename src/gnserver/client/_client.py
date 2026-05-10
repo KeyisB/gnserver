@@ -898,7 +898,7 @@ class RawQuicClient(QuicProtocolShell):
         await self._drain_stream_send_buffer(sid)
 
         if has_payload:
-            async for chunk in request.iterSerializedPayload():
+            async for chunk in request.iterSerializedPayload(self.datagramEndpoint.DEPConfig.iter_payload_chunk_size):
                 self._quic.send_stream_data(sid, chunk, end_stream=False)
                 self._schedule_flush()
                 await self._drain_stream_send_buffer(sid)
