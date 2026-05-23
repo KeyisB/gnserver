@@ -1,41 +1,44 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass as std_dataclass
 
 import GNServer
-from GNServer import BaseModel, DataModel, Field, GNRequest, GNResponse, Url, response
+from GNServer import DataModel, Field, GNRequest, GNResponse, Url, response
 from gnobjects.net.base_model import DataModelValidationError, model_validate
 from gnobjects.net.objects import DMPContainer
-from pydantic import BaseModel as PydanticBaseModel
+from pydantic import BaseModel as PydanticModel
 
 
-class PydanticUser(PydanticBaseModel):
+class PydanticUser(PydanticModel):
     user_id: int
     email: str
 
 
-@BaseModel
+@std_dataclass(slots=True)
 class DataUser:
     user_id: int
     email: str
 
 
-@DataModel
-class CreateUser:
+class CreateUser(DataModel):
     email: str = Field(max_bytes=128)
     age: int = Field(min=18, max=120)
     tags: list[str] = Field(max_len=16)
 
 
-@DataModel
-class CreateUserResult:
+data_dict: dict = CreateUser("a@b.c", 18, []).model.toDict()
+
+from_dict: CreateUser = CreateUser.model.fromDict(data_dict)
+
+
+class CreateUserResult(DataModel):
     user_id: int
     nick: str
     created: bool
 
 
 app = GNServer.App()
-
 
 
 @app.post("/users/create")

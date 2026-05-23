@@ -8,12 +8,11 @@ import traceback
 import socket
 import datetime
 import logging
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union, AsyncGenerator, cast, Coroutine, ParamSpec, Concatenate, TypeVar, Literal
+from typing import Any, Awaitable, Callable, Concatenate, Dict, List, Optional, Tuple, Union, AsyncGenerator, cast, Coroutine, ParamSpec, Protocol, TypeAlias, TypeVar, Literal, overload
 from aioquic.asyncio.server import QuicServer
 from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.packet import QuicErrorCode
 from aioquic.quic.events import QuicEvent, StreamDataReceived
-from typing import Any, AsyncGenerator, Union
 from aioquic.quic.events import (
     QuicEvent,
     ConnectionTerminated,
@@ -26,8 +25,8 @@ R = TypeVar("R")
 
 from gnobjects.net.objects import GNRequest, GNResponse, FileObject, TempDataGroup, TempDataObject, Url, DMPContainer, STPContainer
 from gnobjects.net.fastcommands import AllGNFastCommands, GNFastCommand, AllGNFastCommands as responses
-from gnobjects.net.base_model import DataModelValidationError, model_validate
-from pydantic import ValidationError
+from gnobjects.net.base_model import DataModel, DataModelValidationError, model_validate
+from pydantic import BaseModel as PydanticBaseModel, ValidationError
 
 
 from KeyisBTools.bytes.transformation import userFriendly
@@ -43,6 +42,54 @@ from .._gn_pq_quic import GNQuicServer
 from ._datagram_enc import QuicProtocolShell, DatagramEndpoint
 
 from ._models import DEPConfig, CORSObject
+
+
+_RouteReturn: TypeAlias = Union[GNResponse, TempDataObject, TempDataGroup, GNRequest, None]
+_DataModelT = TypeVar("_DataModelT", bound=DataModel)
+_PydanticModelT = TypeVar("_PydanticModelT", bound=PydanticBaseModel)
+
+_RequestRouteHandler: TypeAlias = Callable[Concatenate[GNRequest, P], Awaitable[_RouteReturn]]
+_DataModelRouteHandler: TypeAlias = Callable[Concatenate[_DataModelT, P], Awaitable[_RouteReturn]]
+_PydanticRouteHandler: TypeAlias = Callable[Concatenate[_PydanticModelT, P], Awaitable[_RouteReturn]]
+_RequestDataModelRouteHandler: TypeAlias = Callable[Concatenate[GNRequest, _DataModelT, P], Awaitable[_RouteReturn]]
+_DataModelRequestRouteHandler: TypeAlias = Callable[Concatenate[_DataModelT, GNRequest, P], Awaitable[_RouteReturn]]
+_RequestPydanticRouteHandler: TypeAlias = Callable[Concatenate[GNRequest, _PydanticModelT, P], Awaitable[_RouteReturn]]
+_PydanticRequestRouteHandler: TypeAlias = Callable[Concatenate[_PydanticModelT, GNRequest, P], Awaitable[_RouteReturn]]
+
+
+class _RouteDecorator(Protocol):
+    @overload
+    def __call__(self, fn: _RequestRouteHandler[P]) -> _RequestRouteHandler[P]: ...
+
+    @overload
+    def __call__(self, fn: _DataModelRouteHandler[_DataModelT, P]) -> _DataModelRouteHandler[_DataModelT, P]: ...
+
+    @overload
+    def __call__(self, fn: _PydanticRouteHandler[_PydanticModelT, P]) -> _PydanticRouteHandler[_PydanticModelT, P]: ...
+
+    @overload
+    def __call__(
+        self,
+        fn: _RequestDataModelRouteHandler[_DataModelT, P]
+    ) -> _RequestDataModelRouteHandler[_DataModelT, P]: ...
+
+    @overload
+    def __call__(
+        self,
+        fn: _DataModelRequestRouteHandler[_DataModelT, P]
+    ) -> _DataModelRequestRouteHandler[_DataModelT, P]: ...
+
+    @overload
+    def __call__(
+        self,
+        fn: _RequestPydanticRouteHandler[_PydanticModelT, P]
+    ) -> _RequestPydanticRouteHandler[_PydanticModelT, P]: ...
+
+    @overload
+    def __call__(
+        self,
+        fn: _PydanticRequestRouteHandler[_PydanticModelT, P]
+    ) -> _PydanticRequestRouteHandler[_PydanticModelT, P]: ...
 
 
 
@@ -229,10 +276,17 @@ class App:
             return
         await a.sendRequest(request, end_stream)
 
-    def route(self, method: str, path: str, cors: Optional[CORSObject] = None, route:str = 'api'):
+    def route(
+        self,
+        method: str,
+        path: str,
+        cors: Optional[CORSObject] = None,
+        route: str = 'api',
+    ) -> _RouteDecorator:
         if path == '':
             path = '/'
-        def decorator(fn: Callable[Concatenate[GNRequest, P], Coroutine[None, None, Union[GNResponse, TempDataObject, TempDataGroup, GNRequest, None]]]):
+
+        def decorator(fn: Callable[..., Awaitable[_RouteReturn]]) -> Callable[..., Awaitable[_RouteReturn]]:
             regex, param_types = _compile_path(path)
             route_obj = Route(
                 route,
@@ -248,18 +302,18 @@ class App:
             self._index_route(route_obj)
             register_schema_by_key(fn)
             return fn
-        return decorator
+        return cast(_RouteDecorator, decorator)
 
-    def get(self, path: str, *, cors: Optional[CORSObject] = None):
+    def get(self, path: str, *, cors: Optional[CORSObject] = None) -> _RouteDecorator:
         return self.route("get", path, cors)
 
-    def post(self, path: str, *, cors: Optional[CORSObject] = None):
+    def post(self, path: str, *, cors: Optional[CORSObject] = None) -> _RouteDecorator:
         return self.route("post", path, cors)
 
-    def put(self, path: str, *, cors: Optional[CORSObject] = None):
+    def put(self, path: str, *, cors: Optional[CORSObject] = None) -> _RouteDecorator:
         return self.route("put", path, cors)
 
-    def delete(self, path: str, *, cors: Optional[CORSObject] = None):
+    def delete(self, path: str, *, cors: Optional[CORSObject] = None) -> _RouteDecorator:
         return self.route("delete", path, cors)
 
     def setRouteCors(self, cors: Optional[CORSObject] = None):

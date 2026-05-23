@@ -44,7 +44,6 @@ __all__ = [
     'FileObject',
     'TempDataGroup',
     'TempDataObject',
-    'BaseModel',
     'DataModel',
     'Field',
     'dataclass',
@@ -61,7 +60,6 @@ from .server._models import DEPConfig, CORSObject
 
 from gnobjects.net.objects import Url, GNRequest, GNResponse, CommandObject, FileObject, GNTransportProtocol, TempDataGroup, TempDataObject
 from gnobjects.net.base_model import (
-    BaseModel,
     DataModel,
     Field,
     dataclass,
