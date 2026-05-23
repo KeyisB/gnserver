@@ -26,7 +26,7 @@ R = TypeVar("R")
 
 from gnobjects.net.objects import GNRequest, GNResponse, FileObject, TempDataGroup, TempDataObject, Url, DMPContainer, STPContainer
 from gnobjects.net.fastcommands import AllGNFastCommands, GNFastCommand, AllGNFastCommands as responses
-from gnobjects.net.base_model import FastDataModelValidationError, model_validate
+from gnobjects.net.base_model import DataModelValidationError, model_validate
 from pydantic import ValidationError
 
 
@@ -451,7 +451,7 @@ class App:
                             })
                         try:
                             kw[bf.name] = model_validate(bf.model_class, container.payload)
-                        except (ValidationError, FastDataModelValidationError) as exc:
+                        except (ValidationError, DataModelValidationError) as exc:
                             raise AllGNFastCommands.UnprocessableEntity({
                                 'dev_error': f"Parameter '{bf.name}' DMP validation failed: {exc}",
                                 'user_error': f'Server request error {self.domain}'

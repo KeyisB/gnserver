@@ -45,7 +45,8 @@ __all__ = [
     'TempDataGroup',
     'TempDataObject',
     'BaseModel',
-    'FastDataModel',
+    'DataModel',
+    'Field',
     'dataclass',
     'DEPConfig',
     'GNTransportProtocol',
@@ -59,7 +60,12 @@ from .server._app import App
 from .server._models import DEPConfig, CORSObject
 
 from gnobjects.net.objects import Url, GNRequest, GNResponse, CommandObject, FileObject, GNTransportProtocol, TempDataGroup, TempDataObject
-from gnobjects.net.base_model import BaseModel, FastDataModel, dataclass
+from gnobjects.net.base_model import (
+    BaseModel,
+    DataModel,
+    Field,
+    dataclass,
+)
 from gnobjects.net.objects import AllGNFastCommands as response
 
 responses = response
