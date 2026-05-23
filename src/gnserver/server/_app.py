@@ -24,8 +24,10 @@ from pathlib import Path
 P = ParamSpec("P")
 R = TypeVar("R")
 
-from gnobjects.net.objects import GNRequest, GNResponse, FileObject, TempDataGroup, TempDataObject, Url
+from gnobjects.net.objects import GNRequest, GNResponse, FileObject, TempDataGroup, TempDataObject, Url, DMPContainer, STPContainer
 from gnobjects.net.fastcommands import AllGNFastCommands, GNFastCommand, AllGNFastCommands as responses
+from gnobjects.net.base_model import FastDataModelValidationError, model_validate
+from pydantic import ValidationError
 
 
 from KeyisBTools.bytes.transformation import userFriendly
@@ -99,6 +101,7 @@ class App:
         self._route_param_names: Dict[int, set[str]] = {}
         self._route_annotations: Dict[int, Dict[str, Any]] = {}
         self._route_is_asyncgen: Dict[int, bool] = {}
+        self._route_schema: dict[int, Any] = {}
 
         self.domain: str = None # type: ignore
 
@@ -175,6 +178,7 @@ class App:
         self._route_param_names[rid] = set(sig.parameters.keys())
         self._route_annotations[rid] = {name: p.annotation for name, p in sig.parameters.items()}
         self._route_is_asyncgen[rid] = inspect.isasyncgenfunction(route.handler)
+        self._route_schema[rid] = register_schema_by_key(route.handler)
 
         is_static = self._is_static_route_path(route.path_expr)
         self._route_is_static[rid] = is_static
@@ -392,6 +396,8 @@ class App:
 
             params = self._route_param_names[rid]
             annotations = self._route_annotations[rid]
+            schema = self._route_schema[rid]
+            body_param_names = schema.body_param_names
 
             resolve_cors(request, r.cors)
 
@@ -401,9 +407,12 @@ class App:
             kw: dict[str, Any] = {
                 name: _convert_value(val, _ann(name), r.param_types.get(name, str))
                 for name, val in path_params.items()
+                if name not in body_param_names
             }
 
             for qn, qvals in request.url.params.items():
+                if qn in body_param_names:
+                    continue
                 if qn in kw:
                     continue
                 if isinstance(qvals, int):
@@ -415,7 +424,47 @@ class App:
             
             kw = {k: v for k, v in kw.items() if k in params}
 
-            
+            if schema.body_fields:
+                for bf in schema.body_fields:
+                    kw.pop(bf.name, None)
+
+                tdo = None
+                container = None
+                for bf in schema.body_fields:
+                    if tdo is None:
+                        tdo = await request.tdo
+                        container = tdo.container if tdo is not None else None
+                    if isinstance(container, DMPContainer) and isinstance(container.payload, dict):
+                        if container.version != 0:
+                            raise AllGNFastCommands.UnprocessableEntity({
+                                'dev_error': f"Parameter '{bf.name}' requires DMP container version 0, got {container.version}",
+                                'user_error': f'Server request error {self.domain}'
+                            })
+                        if container.schema_kind != bf.schema_kind or container.schema_name != bf.schema_name:
+                            raise AllGNFastCommands.UnprocessableEntity({
+                                'dev_error': (
+                                    f"Parameter '{bf.name}' requires DMP schema "
+                                    f"kind={bf.schema_kind}, name={bf.schema_name!r}; "
+                                    f"got kind={container.schema_kind}, name={container.schema_name!r}"
+                                ),
+                                'user_error': f'Server request error {self.domain}'
+                            })
+                        try:
+                            kw[bf.name] = model_validate(bf.model_class, container.payload)
+                        except (ValidationError, FastDataModelValidationError) as exc:
+                            raise AllGNFastCommands.UnprocessableEntity({
+                                'dev_error': f"Parameter '{bf.name}' DMP validation failed: {exc}",
+                                'user_error': f'Server request error {self.domain}'
+                            }) from exc
+                    elif bf.required or not (
+                        container is None
+                        or (isinstance(container, STPContainer) and container.payload is None)
+                    ):
+                        raise AllGNFastCommands.UnprocessableEntity({
+                            'dev_error': f"Parameter '{bf.name}' requires DMP container (type 5), got {type(container).__name__}",
+                            'user_error': f'Server request error {self.domain}'
+                        })
+
             rv = validate_params_by_key(kw, r.handler)
             if rv is not None:
                 raise AllGNFastCommands.UnprocessableEntity({'dev_error': rv, 'user_error': f'Server request error {self.domain}'})

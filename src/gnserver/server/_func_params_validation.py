@@ -3,8 +3,11 @@ import inspect
 import datetime
 import functools
 import threading
+import types
 from inspect import Parameter, _empty
 from typing import Any, Union, get_origin, get_args, get_type_hints
+
+from gnobjects.net.base_model import is_model_type, model_schema_kind, model_schema_name
 _NoneType = type(None)
 _KEYTYPES = (str, bytes, int)
 
@@ -49,7 +52,7 @@ def _compile_checker(ann: Any):
         return chk
 
     origin = get_origin(ann)
-    if origin is Union:
+    if origin in (Union, types.UnionType):
         alts = tuple(_compile_checker(a) for a in get_args(ann))
         types_str = " | ".join(_ann_to_str(a) for a in get_args(ann))
         def chk(v): # type: ignore
@@ -167,7 +170,7 @@ def _compile_checker(ann: Any):
 
 def _ann_to_str(t):
     o = get_origin(t)
-    if o is Union: return " | ".join(_ann_to_str(a) for a in get_args(t))
+    if o in (Union, types.UnionType): return " | ".join(_ann_to_str(a) for a in get_args(t))
     try: return t.__name__
     except Exception: return str(t)
 
@@ -175,16 +178,50 @@ class _Field:
     __slots__ = ("name","required","checker")
     def __init__(self, name, required, checker): self.name=name; self.required=required; self.checker=checker
 
+class _BodyField:
+    __slots__ = ("name", "model_class", "required", "schema_kind", "schema_name")
+    def __init__(self, name, model_class, required):
+        self.name = name
+        self.model_class = model_class
+        self.required = required
+        self.schema_kind = model_schema_kind(model_class)
+        self.schema_name = model_schema_name(model_class)
+
 class Schema:
-    __slots__ = ("fields","names","has_kwargs")
-    def __init__(self, fields, names, has_kwargs): self.fields=fields; self.names=names; self.has_kwargs=has_kwargs
+    __slots__ = ("fields","names","has_kwargs","body_fields","body_param_names")
+    def __init__(self, fields, names, has_kwargs, body_fields=()):
+        self.fields=fields; self.names=names; self.has_kwargs=has_kwargs
+        self.body_fields: tuple[_BodyField, ...] = tuple(body_fields)
+        self.body_param_names = frozenset(bf.name for bf in self.body_fields)
 
 _SCHEMA_CACHE: dict[Any, Schema] = {}
 _SCHEMA_LOCK = threading.Lock()
 
+def _body_model_type(ann):
+    if ann is _empty:
+        return None
+    if is_model_type(ann):
+        return ann
+
+    origin = get_origin(ann)
+    if origin not in (Union, types.UnionType):
+        return None
+
+    args = get_args(ann)
+    model_args = [arg for arg in args if is_model_type(arg)]
+    if not model_args:
+        return None
+
+    non_none_args = [arg for arg in args if arg is not _NoneType]
+    if len(model_args) == 1 and len(non_none_args) == 1:
+        return model_args[0]
+
+    raise TypeError("GN body model union supports only Model | None")
+
 def _build_schema_from_params(func_params) -> Schema:
     pmap = dict(func_params)
     fields = []
+    body_fields = []
     names = set()
     has_kwargs = False
     for name, p in pmap.items():
@@ -194,11 +231,19 @@ def _build_schema_from_params(func_params) -> Schema:
             has_kwargs = True; continue
         if p.kind == Parameter.VAR_POSITIONAL:
             continue
-        required = (p.default is _empty)  # Optional[...] не делает параметр необязательным
+        body_model = _body_model_type(p.annotation)
+        if body_model is not None:
+            body_fields.append(_BodyField(name, body_model, p.default is _empty))
+            names.add(name)
+            continue
+        required = (p.default is _empty)
         checker = _compile_checker(p.annotation)
         fields.append(_Field(name, required, checker))
         names.add(name)
-    return Schema(tuple(fields), frozenset(names), has_kwargs)
+    if len(body_fields) > 1:
+        body_names = ", ".join(bf.name for bf in body_fields)
+        raise TypeError(f"Only one GN body model parameter is supported per route: {body_names}")
+    return Schema(tuple(fields), frozenset(names), has_kwargs, tuple(body_fields))
 
 def register_schema_by_key(func) -> Schema:
     """Регистрируем схему по самой функции (делать на старте)."""
