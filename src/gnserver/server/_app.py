@@ -25,7 +25,7 @@ R = TypeVar("R")
 
 from gnobjects.net.objects import GNRequest, GNResponse, FileObject, TempDataGroup, TempDataObject, Url, DMPContainer, STPContainer
 from gnobjects.net.fastcommands import AllGNFastCommands, GNFastCommand, AllGNFastCommands as responses
-from gnobjects.net.base_model import DataModel, DataModelValidationError, model_validate
+from gnobjects.net.base_model import DataModel, DataModelError, DataModelValidationError, model_validate
 from pydantic import BaseModel as PydanticBaseModel, ValidationError
 
 
@@ -505,9 +505,12 @@ class App:
                             })
                         try:
                             kw[bf.name] = model_validate(bf.model_class, container.payload)
-                        except (ValidationError, DataModelValidationError) as exc:
+                        except (ValidationError, DataModelError) as exc:
                             raise AllGNFastCommands.UnprocessableEntity({
-                                'dev_error': f"Parameter '{bf.name}' DMP validation failed: {exc}",
+                                'dev_error': (
+                                    f"Parameter '{bf.name}' DMP validation failed "
+                                    f"({type(exc).__name__}): {exc}"
+                                ),
                                 'user_error': f'Server request error {self.domain}'
                             }) from exc
                     elif bf.required or not (
@@ -529,10 +532,26 @@ class App:
             if "proto" in params:
                 kw["proto"] = proto
 
-            if self._route_is_asyncgen[rid]:
-                return r.handler(**kw)
+            try:
+                if self._route_is_asyncgen[rid]:
+                    return r.handler(**kw)
 
-            result = await r.handler(**kw)
+                result = await r.handler(**kw)
+            except ValidationError as exc:
+                raise responses.UnprocessableEntity({
+                    'dev_error': f"Route '{r.name}' validation failed ({type(exc).__name__}): {exc}",
+                    'user_error': f'Server request error {self.domain}'
+                }) from exc
+            except DataModelValidationError as exc:
+                raise responses.UnprocessableEntity({
+                    'dev_error': f"Route '{r.name}' DataModel validation failed: {exc}",
+                    'user_error': f'Server request error {self.domain}'
+                }) from exc
+            except DataModelError as exc:
+                raise responses.BadRequest({
+                    'dev_error': f"Route '{r.name}' DataModel error ({type(exc).__name__}): {exc}",
+                    'user_error': f'Server request error {self.domain}'
+                }) from exc
 
             if result is None:
                 continue
