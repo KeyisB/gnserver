@@ -216,7 +216,7 @@ class AsyncClient:
         self.__response_callbacks[name] = callback
 
   
-    async def connect(self, request: GNRequest, restart_connection: bool = False, reconnect_wait: float = 10, keep_alive: bool = True) -> Union['QuicClient', GNResponse]:
+    async def connect(self, request: GNRequest, restart_connection: bool = False, reconnect_wait: float = 10, keep_alive: bool = True, connection_data: dict | None = None) -> Union['QuicClient', GNResponse]:
         domain = request.url.hostname
         connect_timeout = reconnect_wait or self._configuration.get('L5', {}).get('connection', {}).get('connect_timeout', 10)
         connect_lock = self._connect_locks.setdefault(domain, asyncio.Lock())
@@ -317,7 +317,13 @@ class AsyncClient:
                 {'source': 'client_domain_changed', 'domain': domain, 'client_domain': getattr(self, '_domain', None)}
             )
 
-        data = await self.getDNS(domain, host=domain if request.url.isIp else None)
+        data = None
+        if connection_data is not None:
+            if 'dns' in connection_data:
+                data = cast(str, connection_data['dns']['ip:port'])
+
+        if data is None:
+            data = await self.getDNS(domain, host=domain if request.url.isIp else None)
 
         data = Url.ipv6_with_port_to_ipv6_and_port(data)
         logger.info(f'Connecting to {domain} dns: {data} (restart_connection={restart_connection}, reconnect_wait={reconnect_wait}, keep_alive={keep_alive})')
@@ -394,7 +400,7 @@ class AsyncClient:
 
         return request
 
-    async def request(self, request: GNRequest, keep_alive: bool = True, restart_connection: bool = False, reconnect_wait: float = 10, only_request: bool = False) -> GNResponse:
+    async def request(self, request: GNRequest, keep_alive: bool = True, restart_connection: bool = False, reconnect_wait: float = 10, only_request: bool = False, connection_data: dict | None = None) -> GNResponse:
         if not isinstance(request, GNRequest):
             raise TypeError(f'AsyncClient.request expects GNRequest, got {type(request).__name__}')
 
@@ -404,7 +410,7 @@ class AsyncClient:
             
             request = await self._resolve_requests_transport(request)
             try:
-                c = await self.connect(request, restart_connection, reconnect_wait, keep_alive=keep_alive)
+                c = await self.connect(request, restart_connection, reconnect_wait, keep_alive=keep_alive, connection_data=connection_data)
             except BaseException as e:
                 if isinstance(e, (GNResponse, GNFastCommand)):
                     return e
