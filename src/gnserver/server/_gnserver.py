@@ -1,6 +1,7 @@
 
 import os
 import sys
+import asyncio
 from typing import Optional, Union, Callable, cast
 from pathlib import Path
 from KeyisBTools.bytes.transformation import userFriendly, hash3
@@ -151,10 +152,28 @@ class GNServer(App):
 
         if data['command'] == 'gn:vm-host:start':
             if '!vmhost_port' in data:
+                _vmhost_port = data['!vmhost_port']
+                _vmhost_node = data.get('!vmhost_node_key')
+                _vmhost_payload = {'node': _vmhost_node} if _vmhost_node is not None else None
+
                 @self.addEventListener('start')
                 async def _ping():
-                    payload = {'node': data['!vmhost_node_key']} if '!vmhost_node_key' in data else None
-                    await self.client.request(GNRequest('post', Url(f'gn://[::1]:{data["!vmhost_port"]}/s/starting-complete'), payload=payload))
+                    # сигнал готовности vmhost-у: будит ожидание старта и засевает свежесть heartbeat
+                    await self.client.request(GNRequest('post', Url(f'gn://[::1]:{_vmhost_port}/s/starting-complete'), payload=_vmhost_payload))
+
+                    # периодический heartbeat: vmhost держит ноду «живой» по свежести, без постоянного пинга
+                    async def _heartbeat_loop():
+                        try:
+                            while True:
+                                await asyncio.sleep(5)
+                                try:
+                                    await self.client.request(GNRequest('post', Url(f'gn://[::1]:{_vmhost_port}/s/heartbeat'), payload=_vmhost_payload))
+                                except Exception:
+                                    pass
+                        except asyncio.CancelledError:
+                            return
+
+                    asyncio.create_task(_heartbeat_loop())
 
             self.run(
                 domain=data['domain'],
