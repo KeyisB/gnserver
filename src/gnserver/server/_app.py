@@ -750,7 +750,7 @@ class App:
             pq_client_domain = self._get_pq_client_domain()
             if (
                 connection_enc is not None
-                and connection_enc.encryption_type == 2
+                and (connection_enc.encryption_type == 2 or connection_enc.keyid[0] == 253)
                 and pq_client_domain is not None
                 and self._domain != pq_client_domain
             ):

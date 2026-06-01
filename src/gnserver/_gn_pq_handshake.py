@@ -544,9 +544,7 @@ def complete_client_handshake(
         f"cf_fp={hashlib.sha3_256(cf_bytes).hexdigest()[:16]} "
         f"mlkem_ss_fp={hashlib.sha3_256(ml_kem_shared_secret).hexdigest()[:16]} "
         f"x25519_ss_fp={hashlib.sha3_256(x25519_shared_secret).hexdigest()[:16]} "
-        f"kdc_key_fp={kdc_key.hex() if kdc_key else 'none'} "
-        f"kdc_key={kdc_key if kdc_key else 'none'} "
-        f"kdc_key_uf={userFriendly.encode(kdc_key) if kdc_key else 'none'}"
+        f"kdc_key={'present' if kdc_key else 'none'}"
     )
 
     established = GNPQEstablishedState(transcript_hash=transcript_hash, root64=root64)
@@ -599,8 +597,6 @@ def complete_server_handshake(
         f"cf_fp={hashlib.sha3_256(cf_bytes).hexdigest()[:16]} "
         f"mlkem_ss_fp={hashlib.sha3_256(ml_kem_shared_secret).hexdigest()[:16]} "
         f"x25519_ss_fp={hashlib.sha3_256(server_state.x25519_shared_secret).hexdigest()[:16]} "
-        f"kdc_key_fp={kdc_key.hex() if kdc_key else 'none'} "
-        f"kdc_key={kdc_key if kdc_key else 'none'} "
-        f"kdc_key_uf={userFriendly.encode(kdc_key) if kdc_key else 'none'}"
+        f"kdc_key={'present' if kdc_key else 'none'}"
     )
     return GNPQEstablishedState(transcript_hash=transcript_hash, root64=root64)

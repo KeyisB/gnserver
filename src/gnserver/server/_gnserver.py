@@ -150,6 +150,12 @@ class GNServer(App):
 
 
         if data['command'] == 'gn:vm-host:start':
+            if '!vmhost_port' in data:
+                @self.addEventListener('start')
+                async def _ping():
+                    payload = {'node': data['!vmhost_node_key']} if '!vmhost_node_key' in data else None
+                    await self.client.request(GNRequest('post', Url(f'gn://[::1]:{data["!vmhost_port"]}/s/starting-complete'), payload=payload))
+
             self.run(
                 domain=data['domain'],
                 port=data['port'],
@@ -158,10 +164,6 @@ class GNServer(App):
 
                 wait=wait
             )
-
-            @self.addEventListener('start')
-            async def _ping():
-                await self.client.request(GNRequest('post', Url(f'gn://[::1]:{data['!vmhost_port']}/s/starting-complete')))
 
     def _readFromHostConfig(self, data: Optional[dict] = None):
         if data is None:

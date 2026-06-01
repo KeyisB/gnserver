@@ -218,8 +218,24 @@ class AsyncClient:
   
     async def connect(self, request: GNRequest, restart_connection: bool = False, reconnect_wait: float = 10, keep_alive: bool = True, connection_data: dict | None = None) -> Union['QuicClient', GNResponse]:
         domain = request.url.hostname
+        kdc_keyid: Optional[Tuple[int, int]] = None
+        kdc_app_domain: Optional[str] = None
+        if connection_data is not None:
+            kdc_data = connection_data.get('kdc')
+            if isinstance(kdc_data, dict):
+                raw_keyid = kdc_data.get('keyid')
+                if isinstance(raw_keyid, (tuple, list)) and len(raw_keyid) == 2:
+                    kdc_keyid = (int(raw_keyid[0]), int(raw_keyid[1]))
+                elif isinstance(raw_keyid, int):
+                    kdc_keyid = (253, raw_keyid)
+                if kdc_keyid is not None and (kdc_keyid[0] != 253 or kdc_keyid[1] < 0 or kdc_keyid[1] > 0xFFFFFFFFFFFFFF):
+                    raise ValueError('connection_data.kdc.keyid must be (253, node_inc_id) with a 7-byte node_inc_id')
+                raw_app_domain = kdc_data.get('app_domain')
+                if isinstance(raw_app_domain, str) and raw_app_domain:
+                    kdc_app_domain = raw_app_domain
+        connection_key = domain if kdc_keyid is None else f'{domain}|kdc:{kdc_keyid[0]}:{kdc_keyid[1]}|app:{kdc_app_domain or ""}'
         connect_timeout = reconnect_wait or self._configuration.get('L5', {}).get('connection', {}).get('connect_timeout', 10)
-        connect_lock = self._connect_locks.setdefault(domain, asyncio.Lock())
+        connect_lock = self._connect_locks.setdefault(connection_key, asyncio.Lock())
 
         async def _acquire_connect_lock() -> None:
             try:
@@ -232,8 +248,8 @@ class AsyncClient:
         if restart_connection:
             await _acquire_connect_lock()
             try:
-                if domain in self._active_connections:
-                    await self.disconnect(domain)
+                if connection_key in self._active_connections:
+                    await self.disconnect(connection_key)
             finally:
                 connect_lock.release()
 
@@ -241,10 +257,10 @@ class AsyncClient:
         c: Optional[QuicClient] = None
 
         while c is None:
-            current = self._active_connections.get(domain)
+            current = self._active_connections.get(connection_key)
             if current is not None:
                 if current._client_domain_generation != self._domain_generation:
-                    await self.disconnect(domain, remember_inactive=False)
+                    await self.disconnect(connection_key, remember_inactive=False)
                     continue
 
                 if current.status == 'active' and current._quik_core is not None:
@@ -254,20 +270,20 @@ class AsyncClient:
                     try:
                         await asyncio.wait_for(asyncio.shield(current.connect_future), connect_timeout)
                     except asyncio.TimeoutError:
-                        if self._active_connections.get(domain) is current:
-                            await self.disconnect(domain)
+                        if self._active_connections.get(connection_key) is current:
+                            await self.disconnect(connection_key)
                         raise AllGNFastCommands.transport.SendTimeout(
                             f'Не удалось отправить запрос (таймаут соединения) с сервером {domain}'
                         )
                     except asyncio.exceptions.CancelledError:
-                        if self._active_connections.get(domain) is current:
-                            await self.disconnect(domain)
+                        if self._active_connections.get(connection_key) is current:
+                            await self.disconnect(connection_key)
                         raise AllGNFastCommands.transport.ConnectionError(
                             {'info': f'Не удалось подключится к серверу {domain}', 'traceback': traceback.format_exc()}
                         )
                     except Exception as e:
-                        if self._active_connections.get(domain) is current:
-                            await self.disconnect(domain)
+                        if self._active_connections.get(connection_key) is current:
+                            await self.disconnect(connection_key)
                         if isinstance(e, (GNResponse, GNFastCommand)):
                             return e
                         raise AllGNFastCommands.transport.ConnectionError(
@@ -282,28 +298,31 @@ class AsyncClient:
                             {'info': f'Не удалось подключится к серверу {domain}', 'traceback': traceback.format_exc()}
                         )
 
-                    if self._active_connections.get(domain) is current:
-                        await self.disconnect(domain)
+                    if self._active_connections.get(connection_key) is current:
+                        await self.disconnect(connection_key)
                     raise AllGNFastCommands.transport.ConnectionError(
                         {'info': f'Не удалось подключится к серверу {domain}', 'traceback': traceback.format_exc()}
                     )
 
                 await _acquire_connect_lock()
                 try:
-                    if self._active_connections.get(domain) is current:
-                        self._active_connections.pop(domain, None)
+                    if self._active_connections.get(connection_key) is current:
+                        self._active_connections.pop(connection_key, None)
                 finally:
                     connect_lock.release()
                 continue
 
             await _acquire_connect_lock()
             try:
-                current = self._active_connections.get(domain)
+                current = self._active_connections.get(connection_key)
                 if current is not None:
                     continue
 
                 c = QuicClient(self, domain, self._domain_generation)
-                self._active_connections[domain] = c
+                c._connection_key = connection_key
+                c._kdc_keyid = kdc_keyid
+                c._kdc_app_domain = kdc_app_domain
+                self._active_connections[connection_key] = c
                 creator = True
             finally:
                 connect_lock.release()
@@ -344,13 +363,13 @@ class AsyncClient:
             if c._client_domain_generation != self._domain_generation:
                 raise RuntimeError('Client domain changed during QUIC connect')
         except asyncio.exceptions.TimeoutError:
-            await self.disconnect(domain)
+            await self.disconnect(connection_key)
             raise AllGNFastCommands.transport.QuicHandshakeTimeout(f'Не удалось подключится к серверу {domain} (таймаут рукопожатия)')
         except asyncio.exceptions.CancelledError:
-            await self.disconnect(domain)
+            await self.disconnect(connection_key)
             raise AllGNFastCommands.transport.ConnectionError({'info': f'Не удалось подключится к серверу {domain}', 'traceback': traceback.format_exc()})
         except Exception as e:
-            await self.disconnect(domain)
+            await self.disconnect(connection_key)
             if isinstance(e, (GNResponse, GNFastCommand)):
                 return e
             raise AllGNFastCommands.transport.ConnectionError({'info': f'Не удалось подключится к серверу {domain}', 'traceback': traceback.format_exc()})
@@ -358,7 +377,7 @@ class AsyncClient:
         try:
             await c.connect_future
         except Exception as e:
-            await self.disconnect(domain)
+            await self.disconnect(connection_key)
             if isinstance(e, (GNResponse, GNFastCommand)):
                 return e
             raise
@@ -368,6 +387,12 @@ class AsyncClient:
     async def disconnect(self, domain, remember_inactive: bool = True):
         connection = self._active_connections.get(domain)
         if connection is None:
+            prefix = f'{domain}|kdc:'
+            for key, active_connection in list(self._active_connections.items()):
+                if isinstance(key, str) and key.startswith(prefix):
+                    await active_connection.disconnect(remember_inactive=remember_inactive)
+                    if self._active_connections.get(key) is active_connection:
+                        self._active_connections.pop(key, None)
             return
         
         await connection.disconnect(remember_inactive=remember_inactive)
@@ -642,10 +667,12 @@ class RawQuicClient(QuicProtocolShell):
             self._connected_waiter = None
             if not waiter.done():
                 waiter.set_exception(error)
+                self._QuicClient._consume_future_exception(waiter)
 
         for inflight in list(self._inflight.values()):
             if isinstance(inflight, asyncio.Future) and not inflight.done():
                 inflight.set_exception(error)
+                self._QuicClient._consume_future_exception(inflight)
         self._inflight.clear()
 
         self.stop()
@@ -850,6 +877,7 @@ class RawQuicClient(QuicProtocolShell):
                 else:
                     if not handler.done():
                         handler.set_exception(transport_error)
+                        client_ref._consume_future_exception(handler)  # Fix 4: гасим необработанную фьючу
 
             for state in self._inflight_streams.values():
                 message = cast(Union[GNRequest, GNResponse], state['message'])
@@ -997,6 +1025,9 @@ class QuicClient:
     def __init__(self, Client: AsyncClient, domain: str, client_domain_generation: int):
         self._client = Client
         self.domain = domain
+        self._connection_key = domain
+        self._kdc_keyid: Optional[Tuple[int, int]] = None
+        self._kdc_app_domain: Optional[str] = None
         self._client_domain_generation = client_domain_generation
         self._quik_core: Optional[RawQuicClient] = None
         self._client_cm = None
@@ -1042,13 +1073,14 @@ class QuicClient:
                     'reason': 'KDC bootstrap disabled for domain until GN QUIC handshake key-upgrade is enabled',
                 })
 
+        kdc_lookup: Union[str, Tuple[int, int]] = self._kdc_keyid if self._kdc_keyid is not None else self.domain
         if encType == 1:
-            await self._client._kdc.requestKeyIfNotExist(self.domain)
+            await self._client._kdc.requestKeyIfNotExist(kdc_lookup)
 
         gn_pq_kdc_key = None
         if encType == 1:
             try:
-                gn_pq_kdc_key = self._client._kdc.getKey(self.domain)
+                gn_pq_kdc_key = self._client._kdc.getKey(kdc_lookup)
             except Exception:
                 gn_pq_kdc_key = None
 
@@ -1130,7 +1162,7 @@ class QuicClient:
         
 
         if self._disconnect_signal is not None:
-            self._disconnect_signal(self.domain)
+            self._disconnect_signal(self._connection_key)
         
 
         if self._quik_core is not None:

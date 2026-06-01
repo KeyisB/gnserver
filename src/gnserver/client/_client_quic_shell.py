@@ -83,6 +83,8 @@ async def connect(
     )
 
     datagramEndpoint._domain = domain
+    datagramEndpoint._kdc_keyid = getattr(quicClient, '_kdc_keyid', None)
+    datagramEndpoint._kdc_app_domain = getattr(quicClient, '_kdc_app_domain', None) or domain
     datagramEndpoint._default_encryption_type = encType
 
     # link protocol ↔ endpoint

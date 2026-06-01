@@ -218,10 +218,18 @@ class ConnectionEncryptor:
             raise AllGNFastCommands.transport.KeyDomainNotFound({'keyid': keyid})
 
         self_domain = self.eEndpoint._kdc._client._domain
+        peer_domain = DestDomain
+        if keyid[0] == 253:
+            if isinstance(self.eEndpoint._quic_routing, QuicServer):
+                self_domain = DestDomain
+                peer_domain = 'gn:node-client'
+            else:
+                self_domain = 'gn:node-client'
+                peer_domain = DestDomain
         key_in, key_out = _derive_bootstrap_transport_keys(
             key,
             local_domain=self_domain,
-            peer_domain=DestDomain,
+            peer_domain=peer_domain,
         )
         self._set_transport_keys(key_in, key_out)
 
@@ -476,10 +484,10 @@ class QuicProtocolShell(QuicConnectionProtocol):
             _prequic_log(f"_apply_gn_pq_session_root skip: root64 already set for peer={peer_domain!r}")
             return True
 
-        # For encType 2 (PQ+TLS, no KDC) prefer authenticated logical domains.
+        # For encType 2 (PQ+TLS, no KDC) and node fallback KDC keys prefer authenticated logical domains.
         # If the client did not present a verified GN PQ certificate, keep the
         # legacy anonymous marker so transport keys stay compatible.
-        if connectionEnc.encryption_type == 2:
+        if connectionEnc.encryption_type == 2 or connectionEnc.keyid[0] == 253:
             is_client = getattr(self._quic, '_is_client', False)
             tls_ctx = getattr(self._quic, 'tls', None)
             if is_client:
@@ -516,7 +524,7 @@ class QuicProtocolShell(QuicConnectionProtocol):
             )
         else:
             asyncio.get_event_loop().call_soon(connectionEnc.applyPendingKeyOut)
-        if connectionEnc.encryption_type == 2:
+        if connectionEnc.encryption_type == 2 or connectionEnc.keyid[0] == 253:
             _prequic_log(
                 f"_apply_gn_pq_session_root OK"
                 f"{peer_domain!r} {connectionEnc.encryption_type} {connectionEnc.keyid}"
@@ -604,6 +612,8 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
 
 
         self._domain: Optional[str] = None
+        self._kdc_keyid: Optional[Tuple[int, int]] = None
+        self._kdc_app_domain: Optional[str] = None
 
 
         self.__transports = transports
@@ -888,6 +898,7 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
         d = await connectionEnc.initByKeyid(encryption_type, keyid)
         if (
             not confirmed_domain_allowed
+            and keyid[0] != 253
             and self.active_key_synchronization_callback_domain_filter is not None
             and not self.active_key_synchronization_callback_domain_filter.match_any(d)
             and not GNDomain.isCore(d)
@@ -951,7 +962,7 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
 
     async def _finalize_key_and_flush(self, connectionEnc: ConnectionEncryptor, encryption_type: int, keyid: Tuple[int, int]):
         d = await connectionEnc.initByKeyid(encryption_type, keyid)
-        if self.active_key_synchronization_callback_domain_filter is not None and not self.active_key_synchronization_callback_domain_filter.match_any(d) and not GNDomain.isCore(d):
+        if keyid[0] != 253 and self.active_key_synchronization_callback_domain_filter is not None and not self.active_key_synchronization_callback_domain_filter.match_any(d) and not GNDomain.isCore(d):
             connectionEnc.ready = None
             raise AllGNFastCommands.transport.PolicyDenied({
                 'domain': d,
@@ -1287,7 +1298,11 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
         current_task = asyncio.current_task()
         try:
             if not connectionEnc.ready:
-                keyid = await connectionEnc.initByDomain(self._default_encryption_type, cast(str, self._domain))
+                if self._kdc_keyid is not None:
+                    keyid = self._kdc_keyid
+                    await connectionEnc.initByKeyid(self._default_encryption_type, keyid)
+                else:
+                    keyid = await connectionEnc.initByDomain(self._default_encryption_type, cast(str, self._domain))
             else:
                 keyid = connectionEnc.keyid
 
