@@ -228,8 +228,8 @@ class AsyncClient:
                     kdc_keyid = (int(raw_keyid[0]), int(raw_keyid[1]))
                 elif isinstance(raw_keyid, int):
                     kdc_keyid = (253, raw_keyid)
-                if kdc_keyid is not None and (kdc_keyid[0] != 253 or kdc_keyid[1] < 0 or kdc_keyid[1] > 0xFFFFFFFFFFFFFF):
-                    raise ValueError('connection_data.kdc.keyid must be (253, node_inc_id) with a 7-byte node_inc_id')
+                if kdc_keyid is not None and (kdc_keyid[0] not in (252, 253) or kdc_keyid[1] < 0 or kdc_keyid[1] > 0xFFFFFFFFFFFFFF):
+                    raise ValueError('connection_data.kdc.keyid must be (252|253, node_inc_id) with a 7-byte node_inc_id')
                 raw_app_domain = kdc_data.get('app_domain')
                 if isinstance(raw_app_domain, str) and raw_app_domain:
                     kdc_app_domain = raw_app_domain
