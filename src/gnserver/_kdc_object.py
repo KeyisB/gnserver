@@ -28,7 +28,7 @@ class InactiveTransportSession:
 class KDCObject:
     @staticmethod
     def isKDCKeyTypeSupported(key_type: int) -> bool:
-        return key_type in (0, 251, 253, 255) or 1 <= key_type <= 100
+        return key_type in (0, 251, 252, 253, 255) or 1 <= key_type <= 100
 
     @classmethod
     def isKDCKeyIdSupported(cls, keyid: Tuple[int, int]) -> bool:
@@ -39,7 +39,7 @@ class KDCObject:
         payload = {
             'keyid': keyid,
             'key_type': keyid[0],
-            'supported_key_types': ['0', '1-100', '251', '253', '255'],
+            'supported_key_types': ['0', '1-100', '251', '252', '253', '255'],
         }
         payload.update(details)
         return payload
@@ -330,8 +330,8 @@ class KDCObject:
                     d = self._second_kdc_domain
             
         else: # List[Tuple[int, int]]
-            if domain_or_keyId[0][0] == 251:
-                # тип ключа 251 это для использования глобального kdc
+            if domain_or_keyId[0][0] in (251, 252):
+                # 251 — глобальный kdc; 252 — глобальный ключ rgate-ноды (единый табель в kdc.core)
                 d = self._second_kdc_domain
             
 
