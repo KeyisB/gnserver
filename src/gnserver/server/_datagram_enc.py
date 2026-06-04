@@ -1195,6 +1195,9 @@ class DatagramEndpoint(asyncio.DatagramProtocol):
         if _keyId < 0:
             _keyId = abs(_keyId)
 
+        if _keyId > 0x7FFFFFFFFFFFFF:
+            _keyId = _keyId % 0x7FFFFFFFFFFFFF
+
 
         b1 = ((0 & 0x0F) << 4) | (encryption_type & 0x0F) # command 4b | encryption_type 4b
         data.append(b1)
