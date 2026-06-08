@@ -307,12 +307,11 @@ class App:
 
         rq = GNRequest(
             'post',
-            Url('gn://*~api.origin.shield.gn/request'),
+            Url('gn://*~api.origin.shield.gn/r'),
             payload=request.iterSerializedPayload(chunk_size),
             cookies={
                 'header': request.serializeHeader(),
                 'id': _id,
-                'origin': self.domain,
             }
         )
 
