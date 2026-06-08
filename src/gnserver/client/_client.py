@@ -278,9 +278,7 @@ class AsyncClient:
                     except asyncio.exceptions.CancelledError:
                         if self._active_connections.get(connection_key) is current:
                             await self.disconnect(connection_key)
-                        raise AllGNFastCommands.transport.ConnectionError(
-                            {'info': f'Не удалось подключится к серверу {domain}', 'traceback': traceback.format_exc()}
-                        )
+                        raise
                     except Exception as e:
                         if self._active_connections.get(connection_key) is current:
                             await self.disconnect(connection_key)
@@ -367,7 +365,7 @@ class AsyncClient:
             raise AllGNFastCommands.transport.QuicHandshakeTimeout(f'Не удалось подключится к серверу {domain} (таймаут рукопожатия)')
         except asyncio.exceptions.CancelledError:
             await self.disconnect(connection_key)
-            raise AllGNFastCommands.transport.ConnectionError({'info': f'Не удалось подключится к серверу {domain}', 'traceback': traceback.format_exc()})
+            raise
         except Exception as e:
             await self.disconnect(connection_key)
             if isinstance(e, (GNResponse, GNFastCommand)):
@@ -425,7 +423,7 @@ class AsyncClient:
 
         return request
 
-    async def request(self, request: GNRequest, keep_alive: bool = True, restart_connection: bool = False, reconnect_wait: float = 10, only_request: bool = False, connection_data: dict | None = None) -> GNResponse:
+    async def request(self, request: GNRequest, keep_alive: bool = True, restart_connection: bool = False, reconnect_wait: float = 10, *, only_request: bool = False, connection_data: dict | None = None, return_on_response_header: bool = False) -> GNResponse:
         if not isinstance(request, GNRequest):
             raise TypeError(f'AsyncClient.request expects GNRequest, got {type(request).__name__}')
 
@@ -437,6 +435,8 @@ class AsyncClient:
             try:
                 c = await self.connect(request, restart_connection, reconnect_wait, keep_alive=keep_alive, connection_data=connection_data)
             except BaseException as e:
+                if isinstance(e, asyncio.CancelledError):
+                    raise
                 if isinstance(e, (GNResponse, GNFastCommand)):
                     return e
                 else:
@@ -448,8 +448,10 @@ class AsyncClient:
             for f in self.__request_callbacks.values():
                 asyncio.create_task(f(request))
             try:
-                r = await c.asyncRequest(request, only_request=only_request)
+                r = await c.asyncRequest(request, only_request=only_request, return_on_response_header=return_on_response_header)
             except BaseException as e:
+                if isinstance(e, asyncio.CancelledError):
+                    raise
                 if isinstance(e, (GNResponse, GNFastCommand)):
                     r = e
                 else:
@@ -914,7 +916,7 @@ class RawQuicClient(QuicProtocolShell):
 
 
 
-    async def request(self, request: GNRequest, only_request: bool = False):
+    async def request(self, request: GNRequest, only_request: bool = False, return_on_response_header: bool = False):
     
         await self._resolve_requests_transport(request)
 
@@ -927,31 +929,58 @@ class RawQuicClient(QuicProtocolShell):
         header = request.serializeHeader()
         has_payload = request.hasPayload
 
-        self._quic.send_stream_data(sid, header, end_stream=not has_payload)
-        self._schedule_flush()
-        await self._drain_stream_send_buffer(sid)
+        async def _send_request() -> None:
+            # header уже поставлен в поток синхронно (ниже, до create_task) — здесь только тело.
+            await self._drain_stream_send_buffer(sid)
 
-        if has_payload:
-            async for chunk in request.iterSerializedPayload(self.datagramEndpoint.DEPConfig.iter_payload_chunk_size):
-                self._quic.send_stream_data(sid, chunk, end_stream=False)
+            if has_payload:
+                async for chunk in request.iterSerializedPayload(self.datagramEndpoint.DEPConfig.iter_payload_chunk_size):
+                    self._quic.send_stream_data(sid, chunk, end_stream=False)
+                    self._schedule_flush()
+                    await self._drain_stream_send_buffer(sid)
+
+                self._quic.send_stream_data(sid, b'', end_stream=True)
                 self._schedule_flush()
                 await self._drain_stream_send_buffer(sid)
 
-            self._quic.send_stream_data(sid, b'', end_stream=True)
-            self._schedule_flush()
-            await self._drain_stream_send_buffer(sid)
-        elif only_request:
-            return AllGNFastCommands.transport.NoResponse()
+        data_ready = False
+        data = None
+        send_task: Optional[asyncio.Task[None]] = None
 
-
-        if only_request:
-            return AllGNFastCommands.transport.NoResponse()
-        
-        logger.debug(f'Waiting for response on stream {sid}...')
         try:
-            data = await asyncio.wait_for(fut, 30)
-            logger.debug(f'Response received on stream {sid}')
-        except asyncio.exceptions.TimeoutError:
+            # Резервируем QUIC-поток СИНХРОННО: ставим header в поток до любого await/
+            # create_task. get_next_available_stream_id() не резервирует id до первой записи,
+            # поэтому без этого конкурентный request() на том же соединении получит тот же
+            # stream_id -> два запроса сольются в один поток и один молча потеряется (таймаут).
+            self._quic.send_stream_data(sid, header, end_stream=not has_payload)
+            self._schedule_flush()
+
+            if return_on_response_header and not only_request:
+                send_task = asyncio.create_task(_send_request())
+
+                def _consume_send_task_exception(task: asyncio.Task[None]) -> None:
+                    if task.cancelled():
+                        return
+                    try:
+                        task.result()
+                    except Exception:
+                        logger.error(f'Request body send failed after response header on stream {sid}:\n{traceback.format_exc()}')
+
+                send_task.add_done_callback(_consume_send_task_exception)
+                done, _ = await asyncio.wait({fut, send_task}, return_when=asyncio.FIRST_COMPLETED)
+
+                if fut in done:
+                    data = fut.result()
+                    data_ready = True
+                    if isinstance(data, GNResponse):
+                        data._request_send_task = send_task
+                else:
+                    await send_task
+            else:
+                await _send_request()
+        except asyncio.CancelledError:
+            if isinstance(send_task, asyncio.Task) and not send_task.done():
+                send_task.cancel()
             self._inflight.pop(sid, None)
             self._buffer.pop(sid, None)
             state = self._inflight_streams.pop(sid, None)
@@ -960,29 +989,77 @@ class RawQuicClient(QuicProtocolShell):
             self._timed_out_streams.add(sid)
             if len(self._timed_out_streams) > 8192:
                 self._timed_out_streams.clear()
-            logger.warning(f'Timeout waiting for response on stream {sid}')
-            return AllGNFastCommands.transport.ReceiveTimeout()
+            raise
         except Exception:
             self._inflight.pop(sid, None)
             self._buffer.pop(sid, None)
             state = self._inflight_streams.pop(sid, None)
             if state is not None:
                 cast(Union[GNRequest, GNResponse], state['message'])._finishIncomingPayload(False)
-            self._timed_out_streams.add(sid)
-            if len(self._timed_out_streams) > 8192:
-                self._timed_out_streams.clear()
             exc = sys.exc_info()[1]
             if isinstance(exc, GNResponse):
                 return exc
             logger.error(traceback.format_exc())
             return _build_transport_connection_error(
                 domain=self._QuicClient.domain,
-                source='request_wait_failed',
+                source='request_send_failed',
                 details={
                     'exception_type': type(exc).__name__ if exc is not None else 'UnknownError',
                     'exception': str(exc) if exc is not None and str(exc) else None,
                 },
             )
+
+        if only_request:
+            return AllGNFastCommands.transport.NoResponse()
+
+        if not data_ready:
+            logger.debug(f'Waiting for response on stream {sid}...')
+            try:
+                data = await asyncio.wait_for(fut, 30)
+                data_ready = True
+                logger.debug(f'Response received on stream {sid}')
+            except asyncio.exceptions.TimeoutError:
+                self._inflight.pop(sid, None)
+                self._buffer.pop(sid, None)
+                state = self._inflight_streams.pop(sid, None)
+                if state is not None:
+                    cast(Union[GNRequest, GNResponse], state['message'])._finishIncomingPayload(False)
+                self._timed_out_streams.add(sid)
+                if len(self._timed_out_streams) > 8192:
+                    self._timed_out_streams.clear()
+                logger.warning(f'Timeout waiting for response on stream {sid}')
+                return AllGNFastCommands.transport.ReceiveTimeout()
+            except asyncio.CancelledError:
+                self._inflight.pop(sid, None)
+                self._buffer.pop(sid, None)
+                state = self._inflight_streams.pop(sid, None)
+                if state is not None:
+                    cast(Union[GNRequest, GNResponse], state['message'])._finishIncomingPayload(False)
+                self._timed_out_streams.add(sid)
+                if len(self._timed_out_streams) > 8192:
+                    self._timed_out_streams.clear()
+                raise
+            except Exception:
+                self._inflight.pop(sid, None)
+                self._buffer.pop(sid, None)
+                state = self._inflight_streams.pop(sid, None)
+                if state is not None:
+                    cast(Union[GNRequest, GNResponse], state['message'])._finishIncomingPayload(False)
+                self._timed_out_streams.add(sid)
+                if len(self._timed_out_streams) > 8192:
+                    self._timed_out_streams.clear()
+                exc = sys.exc_info()[1]
+                if isinstance(exc, GNResponse):
+                    return exc
+                logger.error(traceback.format_exc())
+                return _build_transport_connection_error(
+                    domain=self._QuicClient.domain,
+                    source='request_wait_failed',
+                    details={
+                        'exception_type': type(exc).__name__ if exc is not None else 'UnknownError',
+                        'exception': str(exc) if exc is not None and str(exc) else None,
+                    },
+                )
         
         if data is None:
             return AllGNFastCommands.transport.ConnectionError()
@@ -1187,7 +1264,7 @@ class QuicClient:
 
 
 
-    async def asyncRequest(self, request: GNRequest, only_request: bool = False):
+    async def asyncRequest(self, request: GNRequest, only_request: bool = False, return_on_response_header: bool = False):
         if self._client_domain_generation != self._client._domain_generation:
             await self.disconnect(remember_inactive=False)
             raise RuntimeError('Client domain changed before request send')
@@ -1197,7 +1274,7 @@ class QuicClient:
             if self.status != 'active':
                 raise RuntimeError("Connection not active")
 
-        resp = await self._quik_core.request(request, only_request=only_request)
+        resp = await self._quik_core.request(request, only_request=only_request, return_on_response_header=return_on_response_header)
 
         # After transport-level timeout/errors the current QUIC session can become stale.
         # Drop it so the next request reconnects instead of reusing a broken session.

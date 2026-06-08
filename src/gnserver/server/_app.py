@@ -323,9 +323,12 @@ class App:
             return AllGNFastCommands.transport.NetworkUnreachable()
 
         try:
-            resp = cast(GNResponse, await f)
-        except asyncio.CancelledError:
+            resp = cast(GNResponse, await asyncio.wait_for(f, 15))
+        except asyncio.TimeoutError:
+            self._togn_requests_inflight.pop(_id, None)
             return AllGNFastCommands.transport.ReceiveTimeout()
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.error(f'requestToGN: ошибка ожидания ответа: {e}')
             return AllGNFastCommands.transport.ConnectionError()
@@ -1257,21 +1260,25 @@ class App:
                 raise AllGNFastCommands.app.BadRequest({'message': 'Invalid response header in shield-origin response'})
             resp, _, _ = parsed
 
-            complete = True
-            async for chunk in request.iter.raw(self.DEPConfig.iter_payload_chunk_size):
-                if chunk is None:
-                    complete = False
-                    break
-                resp._feedIncomingPayload(chunk)
-            resp._finishIncomingPayload(complete)
-
             f = self._togn_requests_inflight.get(request_id, None)
             if f is not None:
                 if not f.done():
                     f.set_result(resp)
-                del self._togn_requests_inflight[request_id]
             else:
                 logger.warning(f"requestToGN: ответ с id {request_id} не найден среди inflight-запросов")
+
+            complete = True
+            try:
+                async for chunk in request.iter.raw(self.DEPConfig.iter_payload_chunk_size):
+                    if chunk is None:
+                        complete = False
+                        break
+                    resp._feedIncomingPayload(chunk)
+            except Exception:
+                complete = False
+                raise
+            finally:
+                resp._finishIncomingPayload(complete)
 
             return AllGNFastCommands.ok()
 
