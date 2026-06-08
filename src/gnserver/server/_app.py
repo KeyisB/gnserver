@@ -162,6 +162,11 @@ class App:
 
         self.connections: Dict[str, App._ServerProto] = {}
 
+
+        self._togn_requests_inflight: dict[int, asyncio.Future] = {}
+        self._togn_requests_inflight_c: int = 0
+
+
     @staticmethod
     def _is_static_route_path(path_expr: str) -> bool:
         return path_expr != '*' and not path_expr.startswith('!') and '{' not in path_expr
@@ -270,11 +275,69 @@ class App:
 
         return sorted(by_id.values(), key=lambda r: self._route_order.get(id(r), 0))
 
-    async def sendRequest(self, request: GNRequest, end_stream: bool = True):
+    async def sendRequest(self, request: GNRequest, end_stream: bool = True) -> bool:
+        """
+        # Запрос периспользующий входящее соединение
+
+        Возвращает `True`, если запрос отправлен по существующему входящему
+        соединению, и `False`, если соединения к `request.url.hostname` нет.
+        """
         a = self.connections.get(request.url.hostname)
         if a is None:
-            return
+            return False
         await a.sendRequest(request, end_stream)
+        return True
+
+    async def requestToGN(self, request: GNRequest) -> GNResponse:
+        """
+        # Запрос к системе GN
+
+        Проталкивает `request` в сеть GN через активное входящее соединение от слоя
+        origin shield (`*~api.origin.shield.gn`).
+
+        Запрос отправляется обратным запросом по входящему каналу shield: header
+        исходного запроса передаётся в cookie, а его payload отправляется чанками
+        (`iterSerializedPayload`). Ответ приходит отдельным запросом на роут
+        `/response` (`gn:shield-origin:response`) и резолвит future по `id`.
+        """
+        self._togn_requests_inflight_c += 1
+        _id = self._togn_requests_inflight_c
+
+        chunk_size = self.DEPConfig.iter_payload_chunk_size
+
+        rq = GNRequest(
+            'post',
+            Url('gn://*~api.origin.shield.gn/request'),
+            payload=request.iterSerializedPayload(chunk_size),
+            cookies={
+                'header': request.serializeHeader(),
+                'id': _id,
+                'origin': self.domain,
+            }
+        )
+
+        f = asyncio.get_running_loop().create_future()
+        self._togn_requests_inflight[_id] = f
+
+        if not await self.sendRequest(rq):
+            self._togn_requests_inflight.pop(_id, None)
+            return AllGNFastCommands.transport.NetworkUnreachable()
+
+        try:
+            resp = cast(GNResponse, await f)
+        except asyncio.CancelledError:
+            return AllGNFastCommands.transport.ReceiveTimeout()
+        except Exception as e:
+            logger.error(f'requestToGN: ошибка ожидания ответа: {e}')
+            return AllGNFastCommands.transport.ConnectionError()
+        finally:
+            self._togn_requests_inflight.pop(_id, None)
+
+        return resp
+
+
+
+        
 
     def route(
         self,
@@ -1177,9 +1240,41 @@ class App:
             return responses.ok(_path_to_iter_tdo(file_path, self.DEPConfig.iter_payload_chunk_size))
 
     def _init_sys_routes(self):
-        @self.post('/!gn-vm-host/ping', cors=CORSObject(allow_client_types=['local']))
-        async def r_ping(request: GNRequest):
+        @self.route('post', '/!gn-vm-host/ping', cors=CORSObject(allow_client_types=['local']))
+        async def _(request: GNRequest):
             return responses.ok({'time': datetime.datetime.now(datetime.timezone.utc).isoformat(), 't': datetime.datetime.now(datetime.timezone.utc)})
+
+        @self.route('post', '/response', route='gn:shield-origin:response')
+        async def _(request: GNRequest):
+            if request.client.domain != '*~api.origin.shield.gn':
+                raise AllGNFastCommands.app.Rejected(request.client.domain)
+
+            c = cast(dict, request.cookies)
+            request_id: int = c['id']
+            header_bytes: bytes = c['header']
+
+            parsed = GNResponse.try_deserialize_header(header_bytes)
+            if parsed is None:
+                raise AllGNFastCommands.app.BadRequest({'message': 'Invalid response header in shield-origin response'})
+            resp, _, _ = parsed
+
+            complete = True
+            async for chunk in request.iter.raw(self.DEPConfig.iter_payload_chunk_size):
+                if chunk is None:
+                    complete = False
+                    break
+                resp._feedIncomingPayload(chunk)
+            resp._finishIncomingPayload(complete)
+
+            f = self._togn_requests_inflight.get(request_id, None)
+            if f is not None:
+                if not f.done():
+                    f.set_result(resp)
+                del self._togn_requests_inflight[request_id]
+            else:
+                logger.warning(f"requestToGN: ответ с id {request_id} не найден среди inflight-запросов")
+
+            return AllGNFastCommands.ok()
 
 
 logger.info(f'PID: {os.getpid()}')

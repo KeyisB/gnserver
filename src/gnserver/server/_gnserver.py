@@ -24,7 +24,7 @@ class GNServer(App):
         self.vmhostConfig: dict = {}
         self.fromHostConfig = self.vmhostConfig
 
-        self.rcms_id: int | None = None
+        self.rcms_id: int = None
 
         
         try:
