@@ -731,6 +731,7 @@ class App:
 
             self._domain: Optional[str] = cast(Optional[str], self.datagramEndpoint.getDomain(self))
             self._disconnected = False
+            self._dep_policy_denied = False
             self._init_domain = False
 
             self._refresh_domain()
@@ -791,9 +792,42 @@ class App:
                 self.setDefault_max_datagram_size()
                 self._refresh_domain()
                 domain = self._domain
+                connection_enc = self._get_connection_encryptor()
+                pq_client_domain = self._get_pq_client_domain()
+                dep_domain_filter = self.datagramEndpoint.active_key_synchronization_callback_domain_filter
+                if (
+                    connection_enc is not None
+                    and connection_enc.encryption_type == 2
+                    and dep_domain_filter is not None
+                    and (
+                        pq_client_domain is None
+                        or not dep_domain_filter.match_any(pq_client_domain)
+                    )
+                ):
+                    reason = 'missing_pq_client_domain' if pq_client_domain is None else 'domain_not_allowed'
+                    self._dep_policy_denied = True
+                    logger.warning(
+                        f"[POLICY] closing PQ connection by DEPConfig domain filter: "
+                        f"domain={pq_client_domain!r} reason={reason} "
+                        f"filter={self.datagramEndpoint.DEPConfig.kdc_active_key_synchronization_domain_filter!r}"
+                    )
+                    self.close(
+                        error_code=QuicErrorCode.APPLICATION_ERROR,
+                        reason_phrase='DEPConfig domain policy denied',
+                    )
+                    self.transmit()
+                    return
+
                 self._apply_gn_pq_session_root(domain)
 
             elif isinstance(event, StreamDataReceived):
+                if self._dep_policy_denied:
+                    logger.warning(
+                        f"[POLICY] ignoring stream data after DEPConfig policy denial: "
+                        f"domain={self._domain!r} stream_id={event.stream_id}"
+                    )
+                    return
+
                 request = self._feed_request_stream(event.stream_id, event.data, event.end_stream)
                 if request is not None:
                     asyncio.create_task(self._resolve_request(event.stream_id, request))
