@@ -135,6 +135,7 @@ class App:
         self._only_client = only_client
         self._routes: List[Route] = []
         self._cors: Optional[CORSObject] = CORSObject()
+        self._route_group_cors: Dict[str, CORSObject] = {}
         self._events: Dict[str, List[Dict[str, Union[Any, Callable]]]] = {}
 
         # Route indexes for hot path dispatch.
@@ -443,6 +444,12 @@ class App:
 
     def setRouteCors(self, cors: Optional[CORSObject] = None):
         self._cors = cors
+
+    def setRouteGroupCors(self, route: str, cors: Optional[CORSObject] = None):
+        if cors is None:
+            self._route_group_cors.pop(route, None)
+            return
+        self._route_group_cors[route] = cors
     
     def setDEPConfig(self, config: DEPConfig):
         self.DEPConfig = config
@@ -578,7 +585,12 @@ class App:
             schema = self._route_schema[rid]
             body_param_names = schema.body_param_names
 
-            resolve_cors(request, r.cors)
+            cors = r.cors
+            if cors is None:
+                cors = self._route_group_cors.get(r.route)
+            if cors is None:
+                cors = self._cors
+            await resolve_cors(request, cors)
 
             def _ann(name: str):
                 return annotations.get(name, inspect._empty)
@@ -686,8 +698,6 @@ class App:
                     result._gn_server_proxy_list = [r]  # type: ignore
                 else:
                     result._gn_server_proxy_list.append(r)  # type: ignore
-                if self._cors is not None:
-                    resolve_cors(request, self._cors)
 
                 return await self.dispatchRequest(result)
 
@@ -695,13 +705,6 @@ class App:
                 result = responses.ok(result)
 
             if isinstance(result, GNResponse):
-                c = r.cors
-                if c is not None:
-                    resolve_cors(request, c)
-                else:
-                    if self._cors is not None:
-                        resolve_cors(request, self._cors)
-
                 if result.command.NoResponse:
                     return None
 

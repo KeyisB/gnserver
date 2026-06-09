@@ -153,7 +153,7 @@ class DEPConfig:
 
 class CORSObject:
     def __init__(self,
-                 allow_origins: list[str] | None = None,
+                 allowed_domains: str | list[str] | Callable[[str], bool | Awaitable[bool]] | None = None,
                  allow_object_types: list[Literal['user', 'service', 'freenet', 'company', 'project', 'product']] = ['user', 'service'],
                  allow_client_types: list[Literal['net', 'client', 'server', 'local']] = ['net', 'local', 'server'],
                  allow_methods: list[str] | None = None,
@@ -167,7 +167,7 @@ class CORSObject:
         # Механизм контроля доступа
 
 
-        :allow_origins: Список доменов, с которых разрешен запрос.
+        :allowed_domains: Домен или фильтр доменов, которым разрешен запрос.
         :allow_object_types: Какие типы объектов могут быть доступны.
         
         - `net` - Пользователи и другие службы сети `GN`
@@ -192,7 +192,18 @@ class CORSObject:
         :allow_route_protocols: (TBD)
         :allow_request_protocols: (TBD)
         """
-        self.allow_origins = allow_origins
+        if isinstance(allowed_domains, str):
+            allowed_domain_patterns = [allowed_domains]
+        elif isinstance(allowed_domains, list):
+            allowed_domain_patterns = list(allowed_domains)
+        elif allowed_domains is None or callable(allowed_domains):
+            allowed_domain_patterns = None
+        else:
+            raise TypeError('allowed_domains must be str, list[str], Callable[[str], bool], or None')
+
+        self.allowed_domains = allowed_domains
+        self._allowed_domains_matcher = DomainMatcherList(allowed_domain_patterns) if allowed_domain_patterns is not None else None
+        self._allowed_domains_callback = allowed_domains if callable(allowed_domains) else None
         self.allow_methods = allow_methods
         self.allow_object_types = allow_object_types
         self.allow_client_types = allow_client_types
@@ -200,6 +211,7 @@ class CORSObject:
         self.allow_route_protocols = allow_route_protocols
         self.allow_request_protocols = allow_request_protocols
         self.except_object_types_domains = except_object_types_domains
+        self.except_client_types_domains = except_client_types_domains
         
 
             
@@ -208,8 +220,10 @@ class CORSObject:
     
     def serialize(self) -> bytes | None:
         a = {}
-        if self.allow_origins is not None:
-            a[0] = self.allow_origins
+        if self.allowed_domains is not None:
+            if callable(self.allowed_domains):
+                raise TypeError('CORSObject with allowed_domains callback cannot be serialized')
+            a[0] = self.allowed_domains
         if self.allow_methods is not None:
             a[1] = self.allow_methods
         if self.allow_client_types is not None and self.allow_client_types != ['net']:
@@ -229,7 +243,7 @@ class CORSObject:
     @staticmethod
     def deserialize(data: dict[int, Any]) -> 'CORSObject':
         return CORSObject(
-            allow_origins=data.get(0, None),
+            allowed_domains=data.get(0, None),
             allow_methods=data.get(1, None),
             allow_client_types=data.get(2, ['net']),
 
