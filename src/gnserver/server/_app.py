@@ -18,6 +18,7 @@ from aioquic.quic.events import (
     ConnectionTerminated,
     HandshakeCompleted,
     StreamDataReceived,
+    StreamReset,
 )
 from pathlib import Path
 P = ParamSpec("P")
@@ -315,26 +316,69 @@ class App:
             }
         )
 
-        f = asyncio.get_running_loop().create_future()
+        loop = asyncio.get_running_loop()
+        f = loop.create_future()
         self._togn_requests_inflight[_id] = f
 
-        if not await self.sendRequest(rq):
-            self._togn_requests_inflight.pop(_id, None)
-            return AllGNFastCommands.transport.NetworkUnreachable()
-
+        send_task = asyncio.create_task(self.sendRequest(rq))
+        send_task_done = False
         try:
-            resp = cast(GNResponse, await asyncio.wait_for(f, 15))
+            response_header_deadline = loop.time() + 15.0
+            data_ready = False
+            resp: GNResponse | None = None
+
+            while not data_ready:
+                timeout = max(0.0, response_header_deadline - loop.time())
+                if timeout <= 0.0:
+                    if not send_task.done():
+                        send_task.cancel()
+                    return AllGNFastCommands.transport.ReceiveTimeout()
+
+                wait_items: set[asyncio.Future | asyncio.Task] = {f}
+                if not send_task_done:
+                    wait_items.add(send_task)
+
+                done, _ = await asyncio.wait(wait_items, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
+                if not done:
+                    if not send_task.done():
+                        send_task.cancel()
+                    return AllGNFastCommands.transport.ReceiveTimeout()
+
+                if send_task in done:
+                    send_task_done = True
+                    if not await send_task:
+                        return AllGNFastCommands.transport.NetworkUnreachable()
+
+                if f in done:
+                    resp = cast(GNResponse, f.result())
+                    data_ready = True
+
+            if not send_task_done:
+                def _consume_send_task_exception(task: asyncio.Task[bool]) -> None:
+                    if task.cancelled():
+                        return
+                    try:
+                        task.result()
+                    except Exception:
+                        logger.error(f'requestToGN body send failed after response header for id {_id}:\n{traceback.format_exc()}')
+
+                send_task.add_done_callback(_consume_send_task_exception)
+                resp._request_send_task = send_task
         except asyncio.TimeoutError:
-            self._togn_requests_inflight.pop(_id, None)
+            if not send_task.done():
+                send_task.cancel()
             return AllGNFastCommands.transport.ReceiveTimeout()
         except asyncio.CancelledError:
+            if not send_task.done():
+                send_task.cancel()
             raise
         except Exception as e:
             logger.error(f'requestToGN: ошибка ожидания ответа: {e}')
+            if not send_task.done():
+                send_task.cancel()
             return AllGNFastCommands.transport.ConnectionError()
         finally:
             self._togn_requests_inflight.pop(_id, None)
-
         return resp
 
 
@@ -738,6 +782,17 @@ class App:
                 if request is not None:
                     asyncio.create_task(self._resolve_request(event.stream_id, request))
             
+            elif isinstance(event, StreamReset):
+                state = self._streams.pop(event.stream_id, None)
+                if state is not None:
+                    request = cast(Optional[GNRequest], state.get('request'))
+                    if request is not None:
+                        request._finishIncomingPayload(False)
+                self._buffer.pop(event.stream_id, None)
+                logger.warning(
+                    f"StreamReset for {self._domain}: stream_id={event.stream_id} "
+                    f"error_code={event.error_code}"
+                )
 
             elif isinstance(event, ConnectionTerminated):
                 try:
@@ -982,45 +1037,68 @@ class App:
         async def sendRawResponse(self, stream_id: int, response: GNResponse, end_stream: bool = True):
             header = response.serializeHeader()
             has_payload = response.hasPayload
+            stream_finished = False
 
-            self._quic.send_stream_data(stream_id, header, end_stream=end_stream and not has_payload) # type: ignore
-            self.transmit()
-            await self._drain_stream_send_buffer(stream_id)
-
-            if not has_payload:
-                return
-
-            async for chunk in response.iterSerializedPayload(self.datagramEndpoint.DEPConfig.iter_payload_chunk_size):
-                self._quic.send_stream_data(stream_id, chunk, end_stream=False) # type: ignore
+            try:
+                self._quic.send_stream_data(stream_id, header, end_stream=end_stream and not has_payload) # type: ignore
                 self.transmit()
                 await self._drain_stream_send_buffer(stream_id)
 
-            if end_stream:
-                self._quic.send_stream_data(stream_id, b'', end_stream=True) # type: ignore
-                self.transmit()
-                await self._drain_stream_send_buffer(stream_id)
+                if not has_payload:
+                    stream_finished = end_stream
+                    return
+
+                async for chunk in response.iterSerializedPayload(self.datagramEndpoint.DEPConfig.iter_payload_chunk_size):
+                    self._quic.send_stream_data(stream_id, chunk, end_stream=False) # type: ignore
+                    self.transmit()
+                    await self._drain_stream_send_buffer(stream_id)
+
+                if end_stream:
+                    self._quic.send_stream_data(stream_id, b'', end_stream=True) # type: ignore
+                    self.transmit()
+                    stream_finished = True
+                    await self._drain_stream_send_buffer(stream_id)
+            except BaseException:
+                if not stream_finished:
+                    self._reset_stream_after_send_error(stream_id, 'sendRawResponse')
+                raise
         
         async def sendRequest(self, request: GNRequest, end_stream: bool = True):
             sid = self._quic.get_next_available_stream_id()
             header = request.serializeHeader()
             has_payload = request.hasPayload
+            stream_finished = False
 
-            self._quic.send_stream_data(sid, header, end_stream=end_stream and not has_payload)
-            self.transmit()
-            await self._drain_stream_send_buffer(sid)
-
-            if not has_payload:
-                return
-
-            async for chunk in request.iterSerializedPayload(self.datagramEndpoint.DEPConfig.iter_payload_chunk_size):
-                self._quic.send_stream_data(sid, chunk, end_stream=False)
+            try:
+                self._quic.send_stream_data(sid, header, end_stream=end_stream and not has_payload)
                 self.transmit()
                 await self._drain_stream_send_buffer(sid)
 
-            if end_stream:
-                self._quic.send_stream_data(sid, b'', end_stream=True)
+                if not has_payload:
+                    stream_finished = end_stream
+                    return
+
+                async for chunk in request.iterSerializedPayload(self.datagramEndpoint.DEPConfig.iter_payload_chunk_size):
+                    self._quic.send_stream_data(sid, chunk, end_stream=False)
+                    self.transmit()
+                    await self._drain_stream_send_buffer(sid)
+
+                if end_stream:
+                    self._quic.send_stream_data(sid, b'', end_stream=True)
+                    self.transmit()
+                    stream_finished = True
+                    await self._drain_stream_send_buffer(sid)
+            except BaseException:
+                if not stream_finished:
+                    self._reset_stream_after_send_error(sid, 'sendRequest')
+                raise
+
+        def _reset_stream_after_send_error(self, stream_id: int, source: str) -> None:
+            try:
+                self._quic.reset_stream(stream_id, QuicErrorCode.INTERNAL_ERROR)
                 self.transmit()
-                await self._drain_stream_send_buffer(sid)
+            except Exception:
+                logger.debug(f'{source}: failed to reset stream {stream_id} after send error')
 
     def run(
         self,

@@ -922,18 +922,32 @@ class RawQuicClient(QuicProtocolShell):
 
         sid = self._quic.get_next_available_stream_id()
 
-        fut = asyncio.get_running_loop().create_future()
+        loop = asyncio.get_running_loop()
+        fut = loop.create_future()
         if not only_request:
             self._inflight[sid] = fut
 
         header = request.serializeHeader()
         has_payload = request.hasPayload
 
+        def _reset_outgoing_stream_after_cleanup(source: str) -> None:
+            if not has_payload:
+                return
+            try:
+                self._quic.reset_stream(sid, QuicErrorCode.INTERNAL_ERROR)
+                self._schedule_flush()
+            except Exception:
+                logger.debug(f'{source}: failed to reset request stream {sid} after cleanup')
+
         async def _send_request() -> None:
             # header уже поставлен в поток синхронно (ниже, до create_task) — здесь только тело.
-            await self._drain_stream_send_buffer(sid)
+            stream_finished = False
+            try:
+                await self._drain_stream_send_buffer(sid)
 
-            if has_payload:
+                if not has_payload:
+                    return
+
                 async for chunk in request.iterSerializedPayload(self.datagramEndpoint.DEPConfig.iter_payload_chunk_size):
                     self._quic.send_stream_data(sid, chunk, end_stream=False)
                     self._schedule_flush()
@@ -941,11 +955,17 @@ class RawQuicClient(QuicProtocolShell):
 
                 self._quic.send_stream_data(sid, b'', end_stream=True)
                 self._schedule_flush()
+                stream_finished = True
                 await self._drain_stream_send_buffer(sid)
+            except BaseException:
+                if not stream_finished:
+                    _reset_outgoing_stream_after_cleanup('request_body_send_failed')
+                raise
 
         data_ready = False
         data = None
         send_task: Optional[asyncio.Task[None]] = None
+        response_header_deadline = loop.time() + 15.0 if return_on_response_header and not only_request else None
 
         try:
             # Резервируем QUIC-поток СИНХРОННО: ставим header в поток до любого await/
@@ -967,7 +987,22 @@ class RawQuicClient(QuicProtocolShell):
                         logger.error(f'Request body send failed after response header on stream {sid}:\n{traceback.format_exc()}')
 
                 send_task.add_done_callback(_consume_send_task_exception)
-                done, _ = await asyncio.wait({fut, send_task}, return_when=asyncio.FIRST_COMPLETED)
+                timeout = None if response_header_deadline is None else max(0.0, response_header_deadline - loop.time())
+                done, _ = await asyncio.wait({fut, send_task}, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
+                if not done:
+                    if not send_task.done():
+                        send_task.cancel()
+                    _reset_outgoing_stream_after_cleanup('response_header_timeout')
+                    self._inflight.pop(sid, None)
+                    self._buffer.pop(sid, None)
+                    state = self._inflight_streams.pop(sid, None)
+                    if state is not None:
+                        cast(Union[GNRequest, GNResponse], state['message'])._finishIncomingPayload(False)
+                    self._timed_out_streams.add(sid)
+                    if len(self._timed_out_streams) > 8192:
+                        self._timed_out_streams.clear()
+                    logger.warning(f'Timeout waiting for response header on stream {sid}')
+                    return AllGNFastCommands.transport.ReceiveTimeout()
 
                 if fut in done:
                     data = fut.result()
@@ -981,6 +1016,7 @@ class RawQuicClient(QuicProtocolShell):
         except asyncio.CancelledError:
             if isinstance(send_task, asyncio.Task) and not send_task.done():
                 send_task.cancel()
+            _reset_outgoing_stream_after_cleanup('request_cancelled')
             self._inflight.pop(sid, None)
             self._buffer.pop(sid, None)
             state = self._inflight_streams.pop(sid, None)
@@ -991,6 +1027,7 @@ class RawQuicClient(QuicProtocolShell):
                 self._timed_out_streams.clear()
             raise
         except Exception:
+            _reset_outgoing_stream_after_cleanup('request_failed')
             self._inflight.pop(sid, None)
             self._buffer.pop(sid, None)
             state = self._inflight_streams.pop(sid, None)
@@ -1015,7 +1052,13 @@ class RawQuicClient(QuicProtocolShell):
         if not data_ready:
             logger.debug(f'Waiting for response on stream {sid}...')
             try:
-                data = await asyncio.wait_for(fut, 30)
+                response_timeout = 30.0
+                if response_header_deadline is not None:
+                    response_timeout = max(0.0, response_header_deadline - loop.time())
+                    if response_timeout <= 0.0:
+                        raise asyncio.exceptions.TimeoutError()
+
+                data = await asyncio.wait_for(fut, response_timeout)
                 data_ready = True
                 logger.debug(f'Response received on stream {sid}')
             except asyncio.exceptions.TimeoutError:
