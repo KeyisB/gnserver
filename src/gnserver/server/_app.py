@@ -322,6 +322,15 @@ class App:
 
         send_task = asyncio.create_task(self.sendRequest(rq))
         send_task_done = False
+
+        def _consume_send_task_exception(task: asyncio.Task[bool]) -> None:
+            if task.cancelled():
+                return
+            try:
+                task.result()
+            except Exception:
+                logger.error(f'requestToGN body send failed after response header for id {_id}:\n{traceback.format_exc()}')
+
         try:
             response_header_deadline = loop.time() + 15.0
             data_ready = False
@@ -332,6 +341,7 @@ class App:
                 if timeout <= 0.0:
                     if not send_task.done():
                         send_task.cancel()
+                        send_task.add_done_callback(_consume_send_task_exception)
                     return AllGNFastCommands.transport.ReceiveTimeout()
 
                 wait_items: set[asyncio.Future | asyncio.Task] = {f}
@@ -342,40 +352,46 @@ class App:
                 if not done:
                     if not send_task.done():
                         send_task.cancel()
+                        send_task.add_done_callback(_consume_send_task_exception)
                     return AllGNFastCommands.transport.ReceiveTimeout()
+
+                if f in done:
+                    resp = cast(GNResponse, f.result())
+                    data_ready = True
+                    if not send_task_done:
+                        if send_task.done():
+                            send_task_done = True
+                            if not send_task.cancelled():
+                                try:
+                                    if not send_task.result():
+                                        logger.warning(f'requestToGN body send returned false after response header for id {_id}')
+                                except Exception:
+                                    logger.error(f'requestToGN body send failed after response header for id {_id}:\n{traceback.format_exc()}')
+                    continue
 
                 if send_task in done:
                     send_task_done = True
                     if not await send_task:
                         return AllGNFastCommands.transport.NetworkUnreachable()
 
-                if f in done:
-                    resp = cast(GNResponse, f.result())
-                    data_ready = True
-
             if not send_task_done:
-                def _consume_send_task_exception(task: asyncio.Task[bool]) -> None:
-                    if task.cancelled():
-                        return
-                    try:
-                        task.result()
-                    except Exception:
-                        logger.error(f'requestToGN body send failed after response header for id {_id}:\n{traceback.format_exc()}')
-
                 send_task.add_done_callback(_consume_send_task_exception)
                 resp._request_send_task = send_task
         except asyncio.TimeoutError:
             if not send_task.done():
                 send_task.cancel()
+                send_task.add_done_callback(_consume_send_task_exception)
             return AllGNFastCommands.transport.ReceiveTimeout()
         except asyncio.CancelledError:
             if not send_task.done():
                 send_task.cancel()
+                send_task.add_done_callback(_consume_send_task_exception)
             raise
         except Exception as e:
             logger.error(f'requestToGN: ошибка ожидания ответа: {e}')
             if not send_task.done():
                 send_task.cancel()
+                send_task.add_done_callback(_consume_send_task_exception)
             return AllGNFastCommands.transport.ConnectionError()
         finally:
             self._togn_requests_inflight.pop(_id, None)
